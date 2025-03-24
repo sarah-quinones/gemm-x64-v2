@@ -1,0 +1,17 @@
+[package]
+name = "gemm-x86"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[dev-dependencies]
+aligned-vec = "0.6.4"
+diol = { version = "0.8.3", default-features = false }
+gemm = { version = "0.18.2", features = ["nightly"] }
+gemm-common = { version = "0.18.2", features = ["nightly"] }
+rand = "0.9.0"
+
+[build-dependencies]
+defer = "0.2.1"
+interpol = "0.2.1"
