@@ -7,6 +7,7 @@ edition = "2024"
 
 [dev-dependencies]
 aligned-vec = "0.6.4"
+bytemuck = "1.22.0"
 diol = { version = "0.8.3", default-features = false }
 gemm = { version = "0.18.2", features = ["nightly"] }
 gemm-common = { version = "0.18.2", features = ["nightly"] }

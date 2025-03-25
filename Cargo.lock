@@ -437,6 +437,7 @@ name = "gemm-x86"
 version = "0.1.0"
 dependencies = [
  "aligned-vec",
+ "bytemuck",
  "defer",
  "diol",
  "gemm",

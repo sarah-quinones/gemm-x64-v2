@@ -1,3 +1,5 @@
+use core::ptr::null_mut;
+
 use aligned_vec::avec;
 use diol::prelude::*;
 use gemm::gemm;
@@ -7,7 +9,9 @@ use rand::prelude::*;
 fn bench_gemm(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
     let rng = &mut StdRng::seed_from_u64(0);
     let cs = Ord::max(4096, m.next_multiple_of(8));
-    let _ = gemm_common::cache::kernel_params(m, n, k, 4 * 8, 6, 8);
+    let params = gemm_common::cache::kernel_params(m, n, k, 4 * 8, 6, 8);
+
+    let _ = params;
 
     let lhs = &mut *avec![[4096]| 0.0; cs * k];
     let rhs = &mut *avec![[4096]| 0.0; k * n];
@@ -41,6 +45,61 @@ fn bench_gemm(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
     });
 }
 
+// low level problem: optimizing the matmul microkernel(s)
+// we need an efficient impl of A * B where A: (48 × k), B: (k, 4)
+// we need an efficient impl of A * B where A: (48 × k), B: (k, 3)
+// we need an efficient impl of A * B where A: (48 × k), B: (k, 2)
+// we need an efficient impl of A * B where A: (48 × k), B: (k, 1)
+//
+// we need an efficient impl of A * B where A: (40 × k), B: (k, 4)
+// we need an efficient impl of A * B where A: (40 × k), B: (k, 3)
+// we need an efficient impl of A * B where A: (40 × k), B: (k, 2)
+// we need an efficient impl of A * B where A: (40 × k), B: (k, 1)
+//
+// we need an efficient impl of A * B where A: (32 × k), B: (k, 4)
+// we need an efficient impl of A * B where A: (32 × k), B: (k, 3)
+// we need an efficient impl of A * B where A: (32 × k), B: (k, 2)
+// we need an efficient impl of A * B where A: (32 × k), B: (k, 1)
+//
+// ...
+
+// mid level problem: optimizing the data layout
+// if A or B have a layout that the microkernels don't like,
+// it can be more efficient to copy them into optimized storage first,
+// then do the matmul
+
+// mid level problem #2: multithreading
+
+// high level problem: optimizing the splitting hierarchy
+// C += A * B
+//
+// row split:
+//       C0
+//   C = C1
+//
+//       A0
+//   A = A1
+//
+//   C0 += A0 * B
+//   C1 += A1 * B
+//
+// column split:
+//   C = C0 C1
+//
+//   B = B0 B1
+//
+//   C0 += A * B0
+//   C1 += A * B1
+//
+// depth split:
+//   A = A0 A1
+//
+//       B0
+//   B = B1
+//
+//   C += A0 * B0
+//   C += A1 * B1
+
 fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     bencher: Bencher,
     (m, n, k): (usize, usize, usize),
@@ -70,43 +129,9 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
             col_chunk = [8 * 768, 4 * 768, 2 * 768, 768, 128, 128, 4];
         }
 
-        // let mut row_chunk = [96, 48];
-        // let mut col_chunk = [4, 4, 4];
-
-        // if m >= 2 * n {
-        //     row_chunk[0] *= m.div_ceil(n);
-        // }
-
-        // if m + n >= 16384 {
-        //     col_chunk[1] = 1024;
-        //     if n < 2 * m {
-        //         col_chunk[0] = col_chunk[1];
-        //     }
-        // } else if m + n >= 8192 {
-        //     col_chunk[1] = 512;
-        //     if n < 2 * m {
-        //         col_chunk[0] = col_chunk[1];
-        //     }
-        // } else if m + n >= 6144 {
-        //     col_chunk[1] = 256;
-        //     if n < 2 * m {
-        //         col_chunk[0] = col_chunk[1];
-        //     }
-        // } else if m + n >= 4096 {
-        //     col_chunk[1] = 128;
-        //     if n < 2 * m {
-        //         col_chunk[0] = col_chunk[1];
-        //     }
-        // }
-
-        // if m >= 4 * n {
-        //     col_chunk[0] = n;
-        // } else if n >= 4 * m {
-        //     row_chunk[0] = m;
-        //     col_chunk[0] = n;
-        //     col_chunk[1] = n;
-        // }
-
+        // A and B in this benchmark are column major
+        // row stride is    sizeof(T) * row_distance
+        // column stride is sizeof(T) * row_dim * col_distance
         let lhs_rs = row_chunk.map(|m| m as isize * sizeof);
         let rhs_cs = col_chunk.map(|n| (n * k) as isize * sizeof);
 
@@ -126,18 +151,18 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
         }
 
         kernel(
-            &SIMD512,
+            &F64_SIMD512,
             len,
             sizeof as usize,
-            lhs.as_ptr(),
+            lhs.as_ptr() as _,
             if PACK_LHS {
-                packed_lhs.as_mut_ptr()
+                packed_lhs.as_mut_ptr() as _
             } else {
                 lhs.as_ptr() as _
             },
-            rhs.as_ptr(),
+            rhs.as_ptr() as _,
             if PACK_RHS {
-                packed_rhs.as_mut_ptr()
+                packed_rhs.as_mut_ptr() as _
             } else {
                 rhs.as_ptr() as _
             },
@@ -152,9 +177,11 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
             0,
             0,
             &Dst {
-                ptr: dst.as_mut_ptr(),
+                ptr: dst.as_mut_ptr() as _,
                 rs: sizeof,
                 cs: cs as isize * sizeof,
+                row_idx: null_mut(),
+                col_idx: null_mut(),
             },
             &mut MicrokernelInfo {
                 flags: 0,
@@ -165,7 +192,7 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
                 rhs_cs: k as isize * sizeof,
                 __pad_0__: 0,
                 __pad_1__: 0,
-                alpha: 1.0,
+                alpha: &raw const *&1.0 as _,
             },
         )
     });
