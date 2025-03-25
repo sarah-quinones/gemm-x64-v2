@@ -1018,7 +1018,7 @@ impl Target {
     fn vxor(self, dst: isize, lhs: isize, rhs: isize) -> String {
         let Self { ty, simd } = self;
         let reg = simd.reg();
-        format!("vxor{self.scalar_suffix()}{ty.suffix()} {reg}{dst}, {reg}{lhs}, {reg}{rhs}")
+        format!("vxorp{ty.suffix()} {reg}{dst}, {reg}{lhs}, {reg}{rhs}")
     }
 
     fn vadd(self, dst: isize, lhs: isize, rhs: isize) -> String {
@@ -1094,6 +1094,7 @@ impl Target {
     fn microkernel(self, m: isize, n: isize) -> (String, String) {
         let Self { ty, simd } = self;
         let bits = simd.sizeof() * 8;
+        let need_mask = self.len() > 2;
 
         let ctx = Ctx::new();
         setup!(ctx, self);
@@ -1165,24 +1166,26 @@ impl Target {
                     vxor!(zmm(i), zmm(i), zmm(i));
                 }
 
-                if m * self.len() > 2 {
-                    if m > 1 {
-                        sub!(nrows, (m - 1) * self.len());
-                    }
+                if need_mask {
+                    if m * self.len() > 2 {
+                        if m > 1 {
+                            sub!(nrows, (m - 1) * self.len());
+                        }
 
-                    reg!(tmp);
-                    lea!(tmp, [rip + &format!("{prefix}.mask.data")]);
+                        reg!(tmp);
+                        lea!(tmp, [rip + &format!("{prefix}.mask.data")]);
 
-                    if self.mask_sizeof() <= 8 {
-                        lea!(mask_ptr, [tmp + nrows * self.mask_sizeof()]);
-                    } else {
-                        shl!(nrows, self.mask_sizeof().ilog2());
-                        lea!(mask_ptr, [tmp + nrows * 1]);
-                        shr!(nrows, self.mask_sizeof().ilog2());
-                    }
+                        if self.mask_sizeof() <= 8 {
+                            lea!(mask_ptr, [tmp + nrows * self.mask_sizeof()]);
+                        } else {
+                            shl!(nrows, self.mask_sizeof().ilog2());
+                            lea!(mask_ptr, [tmp + nrows * 1]);
+                            shr!(nrows, self.mask_sizeof().ilog2());
+                        }
 
-                    if m > 1 {
-                        add!(nrows, (m - 1) * self.len());
+                        if m > 1 {
+                            add!(nrows, (m - 1) * self.len());
+                        }
                     }
                 }
 
@@ -1208,11 +1211,15 @@ impl Target {
                     cmp!(nrows, m * self.len());
                     jz!(load);
 
-                    test!(lhs, simd.sizeof() - 1);
-                    jnz!(mask);
+                    if need_mask {
+                        test!(lhs, simd.sizeof() - 1);
+                        jnz!(mask);
 
-                    test!(lhs_cs, simd.sizeof() - 1);
-                    jnz!(mask);
+                        test!(lhs_cs, simd.sizeof() - 1);
+                        jnz!(mask);
+                    } else {
+                        abort!();
+                    }
                 }
 
                 label!(load);
@@ -1252,36 +1259,38 @@ impl Target {
 
                 label!(mask);
                 {
-                    cmp!(packed_lhs, lhs);
-                    jnz!(mask_A);
-                    cmp!(packed_rhs, rhs);
-                    jnz!(mask_noA_B);
-
-                    label!(mask_noA_noB);
-                    {
-                        call!("{prefix}.mask {suffix}");
-                        jmp!(epilogue);
-                    }
-                    label!(mask_A);
-                    {
+                    if need_mask {
+                        cmp!(packed_lhs, lhs);
+                        jnz!(mask_A);
                         cmp!(packed_rhs, rhs);
-                        jnz!(mask_A_B);
-                    }
+                        jnz!(mask_noA_B);
 
-                    label!(mask_A_noB);
-                    {
-                        call!("{prefix}.mask.packA {suffix}");
-                        jmp!(epilogue);
-                    }
-                    label!(mask_noA_B);
-                    {
-                        call!("{prefix}.mask.packB {suffix}");
-                        jmp!(epilogue);
-                    }
-                    label!(mask_A_B);
-                    {
-                        call!("{prefix}.mask.packA.packB {suffix}");
-                        jmp!(epilogue);
+                        label!(mask_noA_noB);
+                        {
+                            call!("{prefix}.mask {suffix}");
+                            jmp!(epilogue);
+                        }
+                        label!(mask_A);
+                        {
+                            cmp!(packed_rhs, rhs);
+                            jnz!(mask_A_B);
+                        }
+
+                        label!(mask_A_noB);
+                        {
+                            call!("{prefix}.mask.packA {suffix}");
+                            jmp!(epilogue);
+                        }
+                        label!(mask_noA_B);
+                        {
+                            call!("{prefix}.mask.packB {suffix}");
+                            jmp!(epilogue);
+                        }
+                        label!(mask_A_B);
+                        {
+                            call!("{prefix}.mask.packA.packB {suffix}");
+                            jmp!(epilogue);
+                        }
                     }
                 }
                 label!(epilogue);
@@ -1291,16 +1300,20 @@ impl Target {
 
                 label!(epilogue_mask);
                 {
-                    test!([info + info_flags], 1);
-                    jz!(epilogue_mask_overwrite);
+                    if need_mask {
+                        test!([info + info_flags], 1);
+                        jz!(epilogue_mask_overwrite);
 
-                    label!(epilogue_mask_add);
-                    call!("{prefix}.epilogue.mask.add {suffix}");
-                    jmp!(end);
+                        label!(epilogue_mask_add);
+                        call!("{prefix}.epilogue.mask.add {suffix}");
+                        jmp!(end);
 
-                    label!(epilogue_mask_overwrite);
-                    call!("{prefix}.epilogue.mask.overwrite {suffix}");
-                    jmp!(end);
+                        label!(epilogue_mask_overwrite);
+                        call!("{prefix}.epilogue.mask.overwrite {suffix}");
+                        jmp!(end);
+                    } else {
+                        abort!();
+                    }
                 }
 
                 label!(epilogue_load);
@@ -1329,7 +1342,11 @@ impl Target {
             ctx[lhs_rs].set(true);
             ctx[mask_ptr].set(true);
 
-            for mask in [false, true] {
+            for mask in if need_mask {
+                vec![false, true]
+            } else {
+                vec![false]
+            } {
                 let __mask__ = if mask { ".mask" } else { ".load" };
 
                 for pack_lhs in [false, true] {
@@ -1493,7 +1510,11 @@ impl Target {
             main
         };
 
-        for mask in [false, true] {
+        for mask in if need_mask {
+            vec![false, true]
+        } else {
+            vec![false]
+        } {
             let __mask__ = if mask { ".mask" } else { ".store" };
 
             for add in [false, true] {
@@ -1640,6 +1661,17 @@ fn main() -> Result {
     let mut f64_simd256 = vec![];
     let mut c64_simd256 = vec![];
 
+    let mut f32_simd128 = vec![];
+    let mut c32_simd128 = vec![];
+    let mut f64_simd128 = vec![];
+    let mut c64_simd128 = vec![];
+
+    let mut f32_simd64 = vec![];
+    let mut c32_simd64 = vec![];
+    let mut f64_simd64 = vec![];
+
+    let mut f32_simd32 = vec![];
+
     for (out, ty) in [
         (&mut f32_simd512, Ty::F32),
         (&mut c32_simd512, Ty::C32),
@@ -1672,6 +1704,27 @@ fn main() -> Result {
                     ty,
                     simd: Simd::_256,
                 };
+
+                let (name, f) = target.microkernel(m, n);
+                code += &f;
+                out.push(name);
+            }
+        }
+    }
+
+    for (out, ty, simd) in [
+        (&mut f32_simd128, Ty::F32, Simd::_128),
+        (&mut c32_simd128, Ty::C32, Simd::_128),
+        (&mut f64_simd128, Ty::F64, Simd::_128),
+        (&mut c64_simd128, Ty::C64, Simd::_128),
+        (&mut f32_simd64, Ty::F32, Simd::_64),
+        (&mut c32_simd64, Ty::C32, Simd::_64),
+        (&mut f64_simd64, Ty::F64, Simd::_64),
+        (&mut f32_simd32, Ty::F32, Simd::_32),
+    ] {
+        for n in 1..=4 {
+            for m in 1..=1 {
+                let target = Target { ty, simd };
 
                 let (name, f) = target.microkernel(m, n);
                 code += &f;
