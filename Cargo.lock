@@ -931,13 +931,11 @@ dependencies = [
 [[package]]
 name = "gemm"
 version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab96b703d31950f1aeddded248bc95543c9efc7ac9c4a21fda8703a83ee35451"
 dependencies = [
  "dyn-stack",
  "gemm-c32",
  "gemm-c64",
- "gemm-common",
+ "gemm-common 0.18.2",
  "gemm-f16",
  "gemm-f32",
  "gemm-f64",
@@ -951,11 +949,9 @@ dependencies = [
 [[package]]
 name = "gemm-c32"
 version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6db9fd9f40421d00eea9dd0770045a5603b8d684654816637732463f4073847"
 dependencies = [
  "dyn-stack",
- "gemm-common",
+ "gemm-common 0.18.2",
  "num-complex",
  "num-traits",
  "paste",
@@ -966,16 +962,33 @@ dependencies = [
 [[package]]
 name = "gemm-c64"
 version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfcad8a3d35a43758330b635d02edad980c1e143dc2f21e6fd25f9e4eada8edf"
 dependencies = [
  "dyn-stack",
- "gemm-common",
+ "gemm-common 0.18.2",
  "num-complex",
  "num-traits",
  "paste",
  "raw-cpuid",
  "seq-macro",
+]
+
+[[package]]
+name = "gemm-common"
+version = "0.18.2"
+dependencies = [
+ "bytemuck",
+ "dyn-stack",
+ "half",
+ "libm",
+ "num-complex",
+ "num-traits",
+ "once_cell",
+ "paste",
+ "pulp",
+ "raw-cpuid",
+ "rayon",
+ "seq-macro",
+ "sysctl",
 ]
 
 [[package]]
@@ -1002,11 +1015,9 @@ dependencies = [
 [[package]]
 name = "gemm-f16"
 version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cff95ae3259432f3c3410eaa919033cd03791d81cebd18018393dc147952e109"
 dependencies = [
  "dyn-stack",
- "gemm-common",
+ "gemm-common 0.18.2",
  "gemm-f32",
  "half",
  "num-complex",
@@ -1020,11 +1031,9 @@ dependencies = [
 [[package]]
 name = "gemm-f32"
 version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc8d3d4385393304f407392f754cd2dc4b315d05063f62cf09f47b58de276864"
 dependencies = [
  "dyn-stack",
- "gemm-common",
+ "gemm-common 0.18.2",
  "num-complex",
  "num-traits",
  "paste",
@@ -1035,11 +1044,9 @@ dependencies = [
 [[package]]
 name = "gemm-f64"
 version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35b2a4f76ce4b8b16eadc11ccf2e083252d8237c1b589558a49b0183545015bd"
 dependencies = [
  "dyn-stack",
- "gemm-common",
+ "gemm-common 0.18.2",
  "num-complex",
  "num-traits",
  "paste",
@@ -1057,7 +1064,7 @@ dependencies = [
  "defer",
  "diol",
  "gemm",
- "gemm-common",
+ "gemm-common 0.18.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "interpol",
  "json",
  "lapack-sys",

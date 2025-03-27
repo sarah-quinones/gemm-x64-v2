@@ -15,7 +15,9 @@ fn bench_gemm(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
     if m > 48 {
         cs = Ord::max(4096, cs);
     }
+
     let params = gemm_common::cache::kernel_params(m, n, k, 4 * 8, 6, 8);
+    // dbg!(params);
 
     let _ = params;
 
@@ -160,11 +162,11 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     let (mut row_chunk, mut col_chunk) = if tall {
         ([m, m, 64 * mr / f, 32 * mr / f, mr], [n, n, 512, 192, nr])
     } else if wide {
-        ([m, m, 1024, 96, mr], [n, 48, 24, 12, nr])
+        ([m, m, 1024, 1024 / f, mr], [n, n, 4048 / f, 2048 / f, nr])
     } else {
         (
             [m, 16 * 1024 / f, 8 * 1024 / f, 32 * mr / f, mr],
-            [8192 / f, 4096 / f, 1024, 2 * nr, nr],
+            [n, 4096 / f, 1024, 2 * nr, nr],
         )
     };
 
@@ -186,6 +188,8 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     let mut packed_rhs_cs = col_chunk.map(|n| (n * k) as isize * sizeof);
 
     packed_rhs_cs[0] = 0;
+    packed_lhs_rs[0] = 0;
+
     for i in 0..q - 1 {
         if col_chunk[i] >= n {
             packed_lhs_rs[i] = 0;
@@ -193,7 +197,7 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     }
     for i in 0..q - 1 {
         if row_chunk[i] >= m {
-            packed_rhs_cs[i] = 0;
+            packed_rhs_cs[i + 1] = 0;
         }
     }
     // packed_lhs_rs[2] = 0;
@@ -201,8 +205,8 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     // packed_lhs_rs[4] = 0;
     // packed_rhs_cs[3] = 0;
     // packed_rhs_cs[4] = 0;
-    // dbg!(packed_lhs_rs);
     // dbg!(packed_rhs_cs);
+    // dbg!(packed_lhs_rs);
 
     bencher.bench(|| unsafe {
         // A and B in this benchmark are column major
@@ -262,7 +266,7 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
                 col_idx: null_mut(),
             },
             &mut MicrokernelInfo {
-                flags: (1 << 63),
+                flags: (0 << 63),
                 depth: k,
                 lhs_rs: sizeof,
                 lhs_cs: cs as isize * sizeof,
@@ -279,6 +283,12 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
 fn main() -> eyre::Result<()> {
     let mut config = BenchConfig::from_args()?;
     let plot_dir = &config.plot_dir.0.take();
+    let cache = try_cache_info_linux().unwrap();
+
+    let k = 64;
+    // dbg!(cache[0].cache_bytes / (k * size_of::<f64>()));
+    // dbg!(cache[1].cache_bytes / (k * size_of::<f64>()));
+    // dbg!(cache[2].cache_bytes / (k * size_of::<f64>()));
 
     for k in [64, 128, 256, 512] {
         let mut args_small: [_; 16] = core::array::from_fn(|i| {

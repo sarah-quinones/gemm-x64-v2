@@ -1800,7 +1800,7 @@ impl Target {
                                         vfma231!(zmm(tmp), zmm(src), zmm(alpha_re));
                                         vmov!(zmm(src), zmm(tmp));
                                     } else {
-                                        vmul!(zmm(src), zmm(src), zmm(alpha_re));
+                                        // vmul!(zmm(src), zmm(src), zmm(alpha_re));
                                     }
                                 };
 
@@ -1835,14 +1835,14 @@ impl Target {
 
                 label!(colmajor);
                 {
-                    add!([info + info_row], nrows);
-
                     if mask {
+                        add!([info + info_row], nrows);
                         add!([info + info_col], n);
 
                         mov!(nrows, 0);
                         sub!(ncols, n);
                     } else {
+                        add!([info + info_row], m * self.len());
                         sub!(nrows, m * self.len());
                         jnz!(end);
 
@@ -1859,10 +1859,11 @@ impl Target {
 
                     jnz!(end);
 
-                    add!([info + info_row], nrows);
                     if mask {
+                        add!([info + info_row], nrows);
                         mov!(nrows, 0);
                     } else {
+                        add!([info + info_row], m * self.len());
                         sub!(nrows, m * self.len());
                     }
                 }
