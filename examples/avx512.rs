@@ -1,14 +1,20 @@
 use core::ptr::null_mut;
 
 use aligned_vec::avec;
-use diol::prelude::*;
+use diol::{Picoseconds, config::*, prelude::*};
 use gemm::gemm;
 use gemm_x86::*;
 use rand::prelude::*;
 
+use gemm_common::cache::CacheInfo;
+use std::fs;
+
 fn bench_gemm(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
     let rng = &mut StdRng::seed_from_u64(0);
-    let cs = Ord::max(4096, m.next_multiple_of(8));
+    let mut cs = m.next_multiple_of(8);
+    if m > 48 {
+        cs = Ord::max(4096, cs);
+    }
     let params = gemm_common::cache::kernel_params(m, n, k, 4 * 8, 6, 8);
 
     let _ = params;
@@ -28,14 +34,14 @@ fn bench_gemm(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
             dst.as_mut_ptr(),
             cs as isize,
             1,
-            true,
+            false,
             lhs.as_ptr(),
             cs as isize,
             1,
             rhs.as_ptr(),
             k as isize,
             1,
-            1.0,
+            0.0,
             1.0,
             false,
             false,
@@ -106,11 +112,29 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
 ) {
     let rng = &mut StdRng::seed_from_u64(0);
     let sizeof = size_of::<f64>() as isize;
-    let len = 64 / size_of::<f64>();
-    let cs = Ord::max(4096, m.next_multiple_of(8));
+
+    let mr = if m <= 1 {
+        1usize
+    } else if m <= 2 {
+        2
+    } else if m <= 4 {
+        4
+    } else if m <= 8 {
+        8
+    } else if m <= 24 {
+        24
+    } else {
+        48
+    };
+    let nr = if m <= 24 { 8 } else { 4 };
+
+    let mut cs = m.next_multiple_of(8);
+    if m > 48 {
+        cs = Ord::max(4096, cs);
+    }
 
     let packed_lhs = &mut *avec![[4096]| 0.0; m.next_multiple_of(8) * k];
-    let packed_rhs = &mut *avec![[4096]| 0.0; n.next_multiple_of(48) * k];
+    let packed_rhs = &mut *avec![[4096]| 0.0; n.next_multiple_of(8) * k];
 
     let lhs = &mut *avec![[4096]| 0.0; cs * k];
     let rhs = &mut *avec![[4096]| 0.0; k * n];
@@ -119,41 +143,95 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     rng.fill(lhs);
     rng.fill(rhs);
 
-    bencher.bench(|| unsafe {
-        let l = 1024 / 48 * 48;
+    if m <= 48 && PACK_RHS {
+        return bencher.skip();
+    }
+    let pack_lhs = n > nr && (n > 6 * nr || cs > 4096);
 
-        let mut row_chunk = [8 * l, 4 * l, 2 * l, l, 96, 48usize];
-        let mut col_chunk = [8 * 512, 4 * 512, 2 * 512, 512, 4, 4, 4usize];
-        if n >= 2 * m {
-            row_chunk = [8 * l, 4 * l, 2 * l, l, 96, 48];
-            col_chunk = [8 * 768, 4 * 768, 2 * 768, 768, 128, 128, 4];
+    if pack_lhs != PACK_LHS {
+        return bencher.skip();
+    }
+
+    let f = Ord::min(8, k.div_ceil(64));
+
+    let tall = m > 2 * n;
+    let wide = n > 2 * m;
+
+    let (mut row_chunk, mut col_chunk) = if tall {
+        ([m, m, 64 * mr / f, 32 * mr / f, mr], [n, n, 512, 192, nr])
+    } else if wide {
+        ([m, m, 1024, 96, mr], [n, 48, 24, 12, nr])
+    } else {
+        (
+            [m, 16 * 1024 / f, 8 * 1024 / f, 32 * mr / f, mr],
+            [8192 / f, 4096 / f, 1024, 2 * nr, nr],
+        )
+    };
+
+    let q = row_chunk.len();
+
+    {
+        for i in (1..q).rev() {
+            row_chunk[i - 1] = Ord::max(row_chunk[i - 1], row_chunk[i]);
         }
+        for i in (1..q).rev() {
+            col_chunk[i - 1] = Ord::max(col_chunk[i - 1], col_chunk[i]);
+        }
+    }
 
+    let lhs_rs = row_chunk.map(|m| m as isize * sizeof);
+    let rhs_cs = col_chunk.map(|n| (n * k) as isize * sizeof);
+
+    let mut packed_lhs_rs = row_chunk.map(|m| (m * k) as isize * sizeof);
+    let mut packed_rhs_cs = col_chunk.map(|n| (n * k) as isize * sizeof);
+
+    packed_rhs_cs[0] = 0;
+    for i in 0..q - 1 {
+        if col_chunk[i] >= n {
+            packed_lhs_rs[i] = 0;
+        }
+    }
+    for i in 0..q - 1 {
+        if row_chunk[i] >= m {
+            packed_rhs_cs[i] = 0;
+        }
+    }
+    // packed_lhs_rs[2] = 0;
+    // packed_lhs_rs[3] = 0;
+    // packed_lhs_rs[4] = 0;
+    // packed_rhs_cs[3] = 0;
+    // packed_rhs_cs[4] = 0;
+    // dbg!(packed_lhs_rs);
+    // dbg!(packed_rhs_cs);
+
+    bencher.bench(|| unsafe {
         // A and B in this benchmark are column major
         // row stride is    sizeof(T) * row_distance
         // column stride is sizeof(T) * row_dim * col_distance
-        let lhs_rs = row_chunk.map(|m| m as isize * sizeof);
-        let rhs_cs = col_chunk.map(|n| (n * k) as isize * sizeof);
 
-        let mut packed_lhs_rs = row_chunk.map(|m| (m * k) as isize * sizeof);
-        let mut packed_rhs_cs = col_chunk.map(|n| (n * k) as isize * sizeof);
-
-        packed_rhs_cs[0] = 0;
-        for i in 0..col_chunk.len() - 1 {
-            if col_chunk[i] >= n {
-                packed_lhs_rs[i] = 0;
-            }
-        }
-        for i in 0..row_chunk.len() {
-            if row_chunk[i] >= m {
-                packed_rhs_cs[i + 1] = 0;
-            }
-        }
-
-        kernel(
-            &F64_SIMD512,
-            len,
+        kernel2(
+            if m <= 1 {
+                &F64_SIMD64
+            } else if m <= 2 {
+                &F64_SIMD128
+            } else if m <= 4 {
+                &F64_SIMD256[8..]
+            } else if m <= 24 {
+                &F64_SIMD512x8
+            } else {
+                &F64_SIMD512x4[..24]
+            },
+            if m <= 1 {
+                1
+            } else if m <= 2 {
+                2
+            } else if m <= 4 {
+                4
+            } else {
+                8
+            },
             sizeof as usize,
+            nr,
             lhs.as_ptr() as _,
             if PACK_LHS {
                 packed_lhs.as_mut_ptr() as _
@@ -184,59 +262,338 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
                 col_idx: null_mut(),
             },
             &mut MicrokernelInfo {
-                flags: 0,
+                flags: (1 << 63),
                 depth: k,
                 lhs_rs: sizeof,
                 lhs_cs: cs as isize * sizeof,
                 rhs_rs: sizeof,
                 rhs_cs: k as isize * sizeof,
-                __pad_0__: 0,
-                __pad_1__: 0,
+                row: 0,
+                col: 0,
                 alpha: &raw const *&1.0 as _,
             },
         )
     });
 }
 
-fn main() -> std::io::Result<()> {
-    let mut bench = Bench::new(BenchConfig::from_args()?);
+fn main() -> eyre::Result<()> {
+    let mut config = BenchConfig::from_args()?;
+    let plot_dir = &config.plot_dir.0.take();
 
-    let k = 512;
+    for k in [64, 128, 256, 512] {
+        let mut args_small: [_; 16] = core::array::from_fn(|i| {
+            let i = i as u32;
+            if i % 2 == 0 {
+                2usize.pow(1 + i / 2 as u32)
+            } else {
+                3 * 2usize.pow(i / 2 as u32)
+            }
+        });
+        args_small.sort_unstable();
+        let args_small = args_small.map(PlotArg);
 
-    bench.register_many(
-        list![
-            (bench_asm::<true, false>),
-            (bench_asm::<true, true>),
+        let mut args_big: [_; 11] = core::array::from_fn(|i| {
+            let i = i as u32;
+            if i % 2 == 0 {
+                2usize.pow(9 + i / 2 as u32)
+            } else {
+                3 * 2usize.pow(8 + i / 2 as u32)
+            }
+        });
+        args_big.sort_unstable();
+
+        let args_big = args_big.map(PlotArg);
+
+        let f = [
+            bench_asm::<false, false>,
+            bench_asm::<false, true>,
+            bench_asm::<true, false>,
+            bench_asm::<true, true>,
             bench_gemm,
-        ],
-        [
-            (128, 1024, k),
-            (256, 1024, k),
-            (512, 1024, k),
-            (1024, 128, k),
-            (1024, 256, k),
-            (1024, 512, k),
-            (48 * 2, 48 * 2, k),
-            (48 * 4, 48 * 4, k),
-            (48 * 2, 48 * 64, k),
-            (48 * 64, 192, k),
-            (192, 48 * 64, k),
-            (1 * 1024, 1 * 1024, k),
-            (2 * 1024, 2 * 1024, k),
-            (3 * 1024, 3 * 1024, k),
-            (4 * 1024, 4 * 1024, k),
-            (6 * 1024, 6 * 1024, k),
-            (7 * 1024, 7 * 1024, k),
-            (8 * 1024, 8 * 1024, k),
-            (16 * 1024, 16 * 1024, k),
-            (8 * 1024, 1024, k),
-            (1024, 8 * 1024, k),
-            (2048, 8 * 1024, k),
-            (4 * 1024, 1024, k),
-            (1024, 4 * 1024, k),
-        ],
-    );
+        ];
 
-    bench.run()?;
+        {
+            config.plot_name = PlotName(format!("small k{k}"));
+            config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
+                (n * n * k) as f64 / time.to_secs()
+            })
+            .with_name("flops");
+            let bench = Bench::new(&config);
+
+            let f = f.map(move |f| {
+                move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, n, k))
+            });
+            bench.register_many(
+                list![
+                    f[0].with_name(&format!("small.k{k}.asm")),
+                    f[1].with_name(&format!("small.k{k}.asm.packB")),
+                    f[2].with_name(&format!("small.k{k}.asm.packA")),
+                    f[3].with_name(&format!("small.k{k}.asm.packA.packB")),
+                    f[4].with_name(&format!("small.k{k}.gemm"))
+                ],
+                args_small,
+            );
+            let results = bench.run()?.combine(
+                &serde_json::from_str(
+                    &std::fs::read_to_string(format!(
+                        "{}/openblas {}.json",
+                        concat!(env!("CARGO_MANIFEST_DIR")),
+                        config.plot_name.0
+                    ))
+                    .unwrap_or_default(),
+                )
+                .unwrap_or(diol::result::BenchResult { groups: vec![] }),
+            );
+            if let Some(plot_dir) = plot_dir {
+                results.plot(&config.plot_name.0, config.plot_axis, plot_dir)?;
+            }
+        }
+        {
+            config.plot_name = PlotName(format!("big k{k}"));
+            config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
+                (n * n * k) as f64 / time.to_secs()
+            })
+            .with_name("flops");
+            let bench = Bench::new(&config);
+
+            let f = f.map(move |f| {
+                move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, n, k))
+            });
+            bench.register_many(
+                list![
+                    f[2].with_name(&format!("big.k{k}.asm.packA")),
+                    f[3].with_name(&format!("big.k{k}.asm.packA.packB")),
+                    f[4].with_name(&format!("big.k{k}.gemm"))
+                ],
+                args_big,
+            );
+            let results = bench.run()?.combine(
+                &serde_json::from_str(
+                    &std::fs::read_to_string(format!(
+                        "{}/openblas {}.json",
+                        concat!(env!("CARGO_MANIFEST_DIR")),
+                        config.plot_name.0
+                    ))
+                    .unwrap_or_default(),
+                )
+                .unwrap_or(diol::result::BenchResult { groups: vec![] }),
+            );
+            if let Some(plot_dir) = plot_dir {
+                results.plot(&config.plot_name.0, config.plot_axis, plot_dir)?;
+            }
+        }
+
+        for PlotArg(m) in args_small {
+            {
+                config.plot_name = PlotName(format!("tall k{k} n{m}"));
+                config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
+                    (n * m * k) as f64 / time.to_secs()
+                })
+                .with_name("flops");
+                let bench = Bench::new(&config);
+                let f = f.map(move |f| {
+                    move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, m, k))
+                });
+                bench.register_many(
+                    list![
+                        f[0].with_name(&format!("tall.k{k}.n{m}.asm")),
+                        f[1].with_name(&format!("tall.k{k}.n{m}.asm.packB")),
+                        f[2].with_name(&format!("tall.k{k}.n{m}.asm.packA")),
+                        f[3].with_name(&format!("tall.k{k}.n{m}.asm.packA.packB")),
+                        f[4].with_name(&format!("tall.k{k}.n{m}.gemm")),
+                    ],
+                    args_big,
+                );
+                let results = bench.run()?.combine(
+                    &serde_json::from_str(
+                        &std::fs::read_to_string(format!(
+                            "{}/openblas {}.json",
+                            concat!(env!("CARGO_MANIFEST_DIR")),
+                            config.plot_name.0
+                        ))
+                        .unwrap_or_default(),
+                    )
+                    .unwrap_or(diol::result::BenchResult { groups: vec![] }),
+                );
+                if let Some(plot_dir) = plot_dir {
+                    results.plot(&config.plot_name.0, config.plot_axis, plot_dir)?;
+                }
+            }
+
+            {
+                config.plot_name = PlotName(format!("wide k{k} m{m}"));
+                config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
+                    (n * m * k) as f64 / time.to_secs()
+                })
+                .with_name("flops");
+                let bench = Bench::new(&config);
+                let f = f.map(move |f| {
+                    move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (m, n, k))
+                });
+                bench.register_many(
+                    list![
+                        f[2].with_name(&format!("wide.k{k}.m{m}.asm.packA")),
+                        f[3].with_name(&format!("wide.k{k}.m{m}.asm.packA.packB")),
+                        f[4].with_name(&format!("wide.k{k}.m{m}.gemm")),
+                    ],
+                    args_big,
+                );
+                let results = bench.run()?.combine(
+                    &serde_json::from_str(
+                        &std::fs::read_to_string(format!(
+                            "{}/openblas {}.json",
+                            concat!(env!("CARGO_MANIFEST_DIR")),
+                            config.plot_name.0
+                        ))
+                        .unwrap_or_default(),
+                    )
+                    .unwrap_or(diol::result::BenchResult { groups: vec![] }),
+                );
+                if let Some(plot_dir) = plot_dir {
+                    results.plot(&config.plot_name.0, config.plot_axis, plot_dir)?;
+                }
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn try_cache_info_linux() -> Result<[CacheInfo; 3], std::io::Error> {
+    let mut all_info = [CacheInfo {
+        associativity: 8,
+        cache_bytes: 0,
+        cache_line_bytes: 64,
+    }; 3];
+
+    let mut l1_shared_count = 1;
+    for cpu_x in fs::read_dir("/sys/devices/system/cpu")? {
+        let cpu_x = cpu_x?.path();
+        let Some(cpu_x_name) = cpu_x.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        if !cpu_x_name.starts_with("cpu") {
+            continue;
+        }
+        let cache = cpu_x.join("cache");
+        if !cache.is_dir() {
+            continue;
+        }
+        'index: for index_y in fs::read_dir(cache)? {
+            let index_y = index_y?.path();
+            if !index_y.is_dir() {
+                continue;
+            }
+            let Some(index_y_name) = index_y.file_name().and_then(|f| f.to_str()) else {
+                continue;
+            };
+            if !index_y_name.starts_with("index") {
+                continue;
+            }
+
+            let mut cache_info = CacheInfo {
+                associativity: 8,
+                cache_bytes: 0,
+                cache_line_bytes: 64,
+            };
+            let mut level: usize = 0;
+            let mut shared_count: usize = 0;
+
+            for entry in fs::read_dir(index_y)? {
+                let entry = entry?.path();
+                if let Some(name) = entry.file_name() {
+                    let contents = fs::read_to_string(&entry)?;
+                    let contents = contents.trim();
+                    if name == "type" && !matches!(contents, "Data" | "Unified") {
+                        continue 'index;
+                    }
+                    if name == "shared_cpu_list" {
+                        for item in contents.split(',') {
+                            if item.contains('-') {
+                                let mut item = item.split('-');
+                                let Some(start) = item.next() else {
+                                    continue 'index;
+                                };
+                                let Some(end) = item.next() else {
+                                    continue 'index;
+                                };
+
+                                let Ok(start) = start.parse::<usize>() else {
+                                    continue 'index;
+                                };
+                                let Ok(end) = end.parse::<usize>() else {
+                                    continue 'index;
+                                };
+
+                                shared_count += end + 1 - start;
+                            } else {
+                                shared_count += 1;
+                            }
+                        }
+                    }
+
+                    if name == "level" {
+                        let Ok(contents) = contents.parse::<usize>() else {
+                            continue 'index;
+                        };
+                        level = contents;
+                    }
+
+                    if name == "coherency_line_size" {
+                        let Ok(contents) = contents.parse::<usize>() else {
+                            continue 'index;
+                        };
+                        cache_info.cache_line_bytes = contents;
+                    }
+                    if name == "ways_of_associativity" {
+                        let Ok(contents) = contents.parse::<usize>() else {
+                            continue 'index;
+                        };
+                        cache_info.associativity = contents;
+                    }
+                    if name == "size" {
+                        if contents.ends_with("G") {
+                            let Ok(contents) = contents.trim_end_matches('G').parse::<usize>()
+                            else {
+                                continue 'index;
+                            };
+                            cache_info.cache_bytes = contents * 1024 * 1024 * 1024;
+                        } else if contents.ends_with("M") {
+                            let Ok(contents) = contents.trim_end_matches('M').parse::<usize>()
+                            else {
+                                continue 'index;
+                            };
+                            cache_info.cache_bytes = contents * 1024 * 1024;
+                        } else if contents.ends_with("K") {
+                            let Ok(contents) = contents.trim_end_matches('K').parse::<usize>()
+                            else {
+                                continue 'index;
+                            };
+                            cache_info.cache_bytes = contents * 1024;
+                        } else {
+                            let Ok(contents) = contents.parse::<usize>() else {
+                                continue 'index;
+                            };
+                            cache_info.cache_bytes = contents;
+                        }
+                    }
+                }
+            }
+            if level == 1 {
+                l1_shared_count = shared_count;
+            }
+            if level > 0 {
+                if cache_info.cache_line_bytes >= all_info[level - 1].cache_line_bytes {
+                    all_info[level - 1].associativity = cache_info.associativity;
+                    all_info[level - 1].cache_line_bytes = cache_info.cache_line_bytes;
+                    all_info[level - 1].cache_bytes = cache_info.cache_bytes / shared_count;
+                }
+            }
+        }
+    }
+    for info in &mut all_info {
+        info.cache_bytes *= l1_shared_count;
+    }
+
+    Ok(all_info)
 }

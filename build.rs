@@ -194,6 +194,12 @@ macro_rules! vmul {
 }
 
 macro_rules! vfma231 {
+    (zmm($dst: expr), zmm($lhs: expr), [$rhs: expr] $(,)?) => {
+        match ($dst, $lhs, $rhs) {
+            (dst, lhs, rhs) => asm!("{target!().vfma231_mem(dst, lhs, Addr::from(rhs))}"),
+        }
+    };
+
     (zmm($dst: expr), zmm($lhs: expr), zmm($rhs: expr) $(,)?) => {
         match ($dst, $lhs, $rhs) {
             (dst, lhs, rhs) => asm!("{target!().vfma231(dst, lhs, rhs)}"),
@@ -202,6 +208,12 @@ macro_rules! vfma231 {
 }
 
 macro_rules! vfma231_conj {
+    (zmm($dst: expr), zmm($lhs: expr), [$rhs: expr] $(,)?) => {
+        match ($dst, $lhs, $rhs) {
+            (dst, lhs, rhs) => asm!("{target!().vfma231_conj_mem(dst, lhs, Addr::from(rhs))}"),
+        }
+    };
+
     (zmm($dst: expr), zmm($lhs: expr), zmm($rhs: expr) $(,)?) => {
         match ($dst, $lhs, $rhs) {
             (dst, lhs, rhs) => asm!("{target!().vfma231_conj(dst, lhs, rhs)}"),
@@ -264,6 +276,14 @@ macro_rules! alloca {
     };
 }
 
+macro_rules! cmovz {
+    ($dst: expr, $src: expr $(,)?) => {{
+        match ($dst, $src) {
+            (dst, src) => asm!("cmovz {dst}, {src}"),
+        }
+    }};
+}
+
 macro_rules! mov {
     ([$dst: expr], $src: expr $(,)?) => {{
         match ($dst, $src) {
@@ -321,6 +341,12 @@ macro_rules! bt {
 }
 
 macro_rules! add {
+    ([$lhs: expr], $rhs: expr $(,)?) => {{
+        match ($lhs, $rhs) {
+            (lhs, rhs) => asm!("add qword ptr {Addr::from(lhs)}, {rhs}"),
+        }
+    }};
+
     ($lhs: expr, $rhs: expr $(,)?) => {{
         match ($lhs, $rhs) {
             (lhs, rhs) => asm!("add {lhs}, {rhs}"),
@@ -1067,6 +1093,35 @@ impl Target {
         }
     }
 
+    fn vfma231_mem(self, dst: isize, lhs: isize, rhs: Addr) -> String {
+        let Self { ty, simd } = self;
+        let reg = simd.reg();
+        if self.is_cplx() {
+            format!(
+                "vfmaddsub231{self.scalar_suffix()}{ty.suffix()} {reg}{dst}, {reg}{lhs}, {rhs} {{{{1to{self.real().len()}}}}}"
+            )
+        } else {
+            format!(
+                "vfmadd231{self.scalar_suffix()}{ty.suffix()} {reg}{dst}, {reg}{lhs}, {rhs} {{{{1to{self.real().len()}}}}}"
+            )
+        }
+    }
+
+    fn vfma231_conj_mem(self, dst: isize, lhs: isize, rhs: Addr) -> String {
+        let Self { ty, simd } = self;
+        let reg = simd.reg();
+
+        if self.is_cplx() {
+            format!(
+                "vfmsubadd231{self.scalar_suffix()}{ty.suffix()} {reg}{dst}, {reg}{lhs}, {rhs} {{{{1to{self.real().len()}}}}}"
+            )
+        } else {
+            format!(
+                "vfmadd231{self.scalar_suffix()}{ty.suffix()} {reg}{dst}, {reg}{lhs}, {rhs} {{{{1to{self.real().len()}}}}}"
+            )
+        }
+    }
+
     fn vfma213(self, dst: isize, lhs: isize, rhs: isize) -> String {
         let Self { ty, simd } = self;
         let reg = simd.reg();
@@ -1094,7 +1149,7 @@ impl Target {
     fn microkernel(self, m: isize, n: isize) -> (String, String) {
         let Self { ty, simd } = self;
         let bits = simd.sizeof() * 8;
-        let need_mask = self.len() > 2;
+        let need_mask = m * self.len() > 2;
 
         let ctx = Ctx::new();
         setup!(ctx, self);
@@ -1105,10 +1160,9 @@ impl Target {
         let rhs = rcx;
         let packed_rhs = rdx;
         let dst = rdi;
-        let nrows = rsi;
-        let info = rbp;
-        let row = r14;
-        let col = r15;
+        let info = rsi;
+        let nrows = r8;
+        let ncols = r9;
 
         let info_flags = 0 * WORD;
         let info_depth = 1 * WORD;
@@ -1116,6 +1170,8 @@ impl Target {
         let info_lhs_cs = 3 * WORD;
         let info_rhs_rs = 4 * WORD;
         let info_rhs_cs = 5 * WORD;
+        let info_row = 6 * WORD;
+        let info_col = 7 * WORD;
         let info_alpha = 8 * WORD;
 
         let dst_ptr = 0 * WORD;
@@ -1129,9 +1185,8 @@ impl Target {
         ctx[packed_rhs].set(true);
         ctx[dst].set(true);
         ctx[nrows].set(true);
+        ctx[ncols].set(true);
         ctx[info].set(true);
-        ctx[row].set(true);
-        ctx[col].set(true);
 
         let prefix = format!("{*PREFIX} gemm.microkernel.{ty}.simd{bits}");
 
@@ -1145,6 +1200,19 @@ impl Target {
 
             let main = {
                 func!("{prefix} {suffix}");
+                label!(row_check);
+                if m > 1 {
+                    cmp!(nrows, (m - 1) * self.len() + 1);
+                    jnc!(col_check);
+                    jmp!("{prefix} [with m = {(m - 1) * self.len()}, n = {n}]");
+                }
+                label!(col_check);
+                if n > 1 {
+                    cmp!(ncols, n);
+                    jnc!(prologue);
+                    jmp!("{prefix} [with m = {m * self.len()}, n = {n - 1}]");
+                }
+                label!(prologue);
 
                 alloca!(lhs);
                 alloca!(rhs);
@@ -1162,31 +1230,52 @@ impl Target {
                 mov!(rhs_rs, [info + info_rhs_rs]);
                 mov!(rhs_cs, [info + info_rhs_cs]);
 
+                {
+                    reg!(tmp);
+
+                    test!(lhs_rs, lhs_rs);
+
+                    mov!(tmp, m * simd.sizeof());
+                    cmovz!(lhs_cs, tmp);
+                    mov!(tmp, ty.sizeof());
+                    cmovz!(lhs_rs, tmp);
+
+                    test!(rhs_cs, rhs_cs);
+                    cmovz!(rhs_cs, tmp);
+                    mov!(tmp, n * ty.sizeof());
+                    cmovz!(rhs_rs, tmp);
+                }
                 for i in 0..m * n {
                     vxor!(zmm(i), zmm(i), zmm(i));
                 }
 
                 if need_mask {
-                    if m * self.len() > 2 {
-                        if m > 1 {
-                            sub!(nrows, (m - 1) * self.len());
-                        }
+                    sub!(nrows, m * self.len());
 
+                    jnc!(no_mask);
+
+                    {
                         reg!(tmp);
                         lea!(tmp, [rip + &format!("{prefix}.mask.data")]);
 
                         if self.mask_sizeof() <= 8 {
-                            lea!(mask_ptr, [tmp + nrows * self.mask_sizeof()]);
+                            lea!(
+                                mask_ptr,
+                                [tmp + nrows * self.mask_sizeof()
+                                    + self.len() * self.mask_sizeof()]
+                            );
                         } else {
                             shl!(nrows, self.mask_sizeof().ilog2());
-                            lea!(mask_ptr, [tmp + nrows * 1]);
+                            lea!(
+                                mask_ptr,
+                                [tmp + nrows * 1 + self.len() * self.mask_sizeof()]
+                            );
                             shr!(nrows, self.mask_sizeof().ilog2());
                         }
-
-                        if m > 1 {
-                            add!(nrows, (m - 1) * self.len());
-                        }
                     }
+                    label!(no_mask);
+
+                    add!(nrows, m * self.len());
                 }
 
                 reg!(&depth);
@@ -1209,7 +1298,7 @@ impl Target {
                 label!(colmajor);
                 {
                     cmp!(nrows, m * self.len());
-                    jz!(load);
+                    jnc!(load);
 
                     if need_mask {
                         test!(lhs, simd.sizeof() - 1);
@@ -1296,7 +1385,7 @@ impl Target {
                 label!(epilogue);
 
                 cmp!(nrows, m * self.len());
-                jz!(epilogue_load);
+                jnc!(epilogue_load);
 
                 label!(epilogue_mask);
                 {
@@ -1374,10 +1463,10 @@ impl Target {
                             }
                             label!(start);
 
-                            if pack_lhs {
-                                mov!([info + info_lhs_rs], ty.sizeof());
-                                mov!([info + info_lhs_cs], simd.sizeof() * m);
-                            }
+                            // if pack_lhs {
+                            //     mov!([info + info_lhs_rs], ty.sizeof());
+                            //     mov!([info + info_lhs_cs], simd.sizeof() * m);
+                            // }
 
                             let rhs_neg_cs = lhs_rs;
 
@@ -1385,116 +1474,209 @@ impl Target {
                             neg!(rhs_neg_cs);
                             add!(rhs, rhs_cs);
 
-                            if simd.dedicated_mask() {
+                            if mask && simd.dedicated_mask() {
                                 kmov!(k(1), [mask_ptr]);
                             }
 
                             label!(nanokernel);
+                            let unroll = 1;
+                            let bcst = bits == 512 && m == 1 && !pack_rhs;
 
-                            for j in 0..n {
-                                vbroadcast!(
-                                    zmm(m * n + m),
-                                    [if j == 0 {
+                            for _ in 0..unroll {
+                                for j in 0..n {
+                                    let rhs_addr = if j % 4 == 0 {
                                         rhs + 1 * rhs_neg_cs
                                     } else {
-                                        rhs + (j - 1) * rhs_cs
-                                    }]
-                                );
-                                if self.is_real() && j + 1 == n {
-                                    add!(rhs, rhs_rs);
-                                }
+                                        rhs + (j % 4 - 1) * rhs_cs
+                                    };
 
-                                if pack_rhs {
-                                    vmovsr!([packed_rhs + j * ty.sizeof()], xmm(m * n + m));
-                                    if self.is_real() && j + 1 == n {
-                                        add!(packed_rhs, 4 * ty.sizeof());
-                                    }
-                                }
-
-                                for i in 0..m {
-                                    if j == 0 {
-                                        if !mask || i + 1 < m {
-                                            vmov!(zmm(m * n + i), [lhs + simd.sizeof() * i]);
-                                        } else {
-                                            if simd.dedicated_mask() {
-                                                vmov!(zmm(m * n + i)[1], [lhs + simd.sizeof() * i]);
-                                            } else {
-                                                vmov!(zmm(m * n + i), [mask_ptr]);
-                                                vmov!(
-                                                    zmm(m * n + i)[m * n + i],
-                                                    [lhs + simd.sizeof() * i]
-                                                );
+                                    if !bcst {
+                                        vbroadcast!(zmm(m * n + m), [rhs_addr]);
+                                        if self.is_real() && n > 4 {
+                                            if j + 1 == 4 {
+                                                lea!(rhs, [rhs + rhs_cs * 4]);
                                             }
                                         }
-                                    }
-                                    if conj {
-                                        vfma231_conj!(
-                                            zmm(m * j + i),
-                                            zmm(m * n + i),
-                                            zmm(m * n + m),
-                                        );
-                                    } else {
-                                        vfma231!(zmm(m * j + i), zmm(m * n + i), zmm(m * n + m),);
-                                    }
-                                    if j == 0 && pack_lhs {
-                                        vmov!([packed_lhs + simd.sizeof() * i], zmm(m * n + i));
-                                    }
-                                }
 
-                                if j == 0 {
-                                    add!(lhs, lhs_cs);
-                                    if pack_lhs {
-                                        add!(packed_lhs, simd.sizeof() * m);
-                                    }
-                                }
-                            }
-
-                            if self.is_cplx() {
-                                for j in 0..n {
-                                    vbroadcast!(
-                                        zmm(m * n + m),
-                                        [if j == 0 {
-                                            rhs + 1 * rhs_neg_cs + ty.sizeof() / 2
-                                        } else {
-                                            rhs + (j - 1) * rhs_cs + ty.sizeof() / 2
-                                        }]
-                                    );
-
-                                    if j + 1 == n {
-                                        add!(rhs, rhs_rs);
+                                        if self.is_real() && j + 1 == n {
+                                            if n > 4 {
+                                                lea!(rhs, [rhs + rhs_neg_cs * 4]);
+                                            }
+                                            add!(rhs, rhs_rs);
+                                        }
                                     }
 
                                     if pack_rhs {
-                                        vmovsr!(
-                                            [packed_rhs + (j * ty.sizeof() + ty.sizeof() / 2)],
-                                            xmm(m * n + m)
-                                        );
-                                        if j + 1 == n {
-                                            add!(packed_rhs, 4 * ty.sizeof());
+                                        vmovsr!([packed_rhs + j * ty.sizeof()], xmm(m * n + m));
+                                        if self.is_real() && j + 1 == n {
+                                            add!(packed_rhs, n * ty.sizeof());
                                         }
                                     }
 
                                     for i in 0..m {
                                         if j == 0 {
-                                            vswap!(zmm(m * n + i));
+                                            if !mask || i + 1 < m {
+                                                vmov!(zmm(m * n + i), [lhs + simd.sizeof() * i]);
+                                            } else {
+                                                if simd.dedicated_mask() {
+                                                    vmov!(
+                                                        zmm(m * n + i)[1],
+                                                        [lhs + simd.sizeof() * i]
+                                                    );
+                                                } else {
+                                                    vmov!(zmm(m * n + i), [mask_ptr]);
+                                                    vmov!(
+                                                        zmm(m * n + i)[m * n + i],
+                                                        [lhs + simd.sizeof() * i]
+                                                    );
+                                                }
+                                            }
                                         }
-                                        if conj {
-                                            vfma231_conj!(
-                                                zmm(m * j + i),
-                                                zmm(m * n + i),
-                                                zmm(m * n + m),
-                                            );
+                                        if bcst {
+                                            if conj {
+                                                vfma231_conj!(
+                                                    zmm(m * j + i),
+                                                    zmm(m * n + i),
+                                                    [rhs_addr],
+                                                );
+                                            } else {
+                                                vfma231!(
+                                                    zmm(m * j + i),
+                                                    zmm(m * n + i),
+                                                    [rhs_addr],
+                                                );
+                                            }
+
+                                            if self.is_real() && n > 4 {
+                                                if j + 1 == 4 {
+                                                    lea!(rhs, [rhs + rhs_cs * 4]);
+                                                }
+                                            }
+
+                                            if self.is_real() && j + 1 == n {
+                                                if n > 4 {
+                                                    lea!(rhs, [rhs + rhs_neg_cs * 4]);
+                                                }
+                                                add!(rhs, rhs_rs);
+                                            }
                                         } else {
-                                            vfma231!(
-                                                zmm(m * j + i),
-                                                zmm(m * n + i),
-                                                zmm(m * n + m),
+                                            if conj {
+                                                vfma231_conj!(
+                                                    zmm(m * j + i),
+                                                    zmm(m * n + i),
+                                                    zmm(m * n + m),
+                                                );
+                                            } else {
+                                                vfma231!(
+                                                    zmm(m * j + i),
+                                                    zmm(m * n + i),
+                                                    zmm(m * n + m),
+                                                );
+                                            }
+                                        }
+
+                                        if j == 0 && pack_lhs {
+                                            vmov!([packed_lhs + simd.sizeof() * i], zmm(m * n + i));
+                                        }
+                                    }
+
+                                    if j == 0 {
+                                        add!(lhs, lhs_cs);
+                                        if pack_lhs {
+                                            add!(packed_lhs, simd.sizeof() * m);
+                                        }
+                                    }
+                                }
+
+                                if self.is_cplx() {
+                                    for j in 0..n {
+                                        let rhs_addr = if j % 4 == 0 {
+                                            rhs + 1 * rhs_neg_cs + ty.sizeof() / 2
+                                        } else {
+                                            rhs + (j % 4 - 1) * rhs_cs + ty.sizeof() / 2
+                                        };
+
+                                        if !bcst {
+                                            vbroadcast!(zmm(m * n + m), [rhs_addr]);
+                                            if n > 4 {
+                                                if (j + 1) % 4 == 0 {
+                                                    lea!(rhs, [rhs + rhs_cs * 4]);
+                                                }
+                                            }
+
+                                            if j + 1 == n {
+                                                if n > 4 {
+                                                    lea!(rhs, [rhs + rhs_neg_cs * 4]);
+                                                }
+                                                add!(rhs, rhs_rs);
+                                            }
+                                        }
+
+                                        if pack_rhs {
+                                            vmovsr!(
+                                                [packed_rhs + (j * ty.sizeof() + ty.sizeof() / 2)],
+                                                xmm(m * n + m)
                                             );
+                                            if j + 1 == n {
+                                                add!(packed_rhs, n * ty.sizeof());
+                                            }
+                                        }
+
+                                        for i in 0..m {
+                                            if j == 0 {
+                                                vswap!(zmm(m * n + i));
+                                            }
+                                            if bcst {
+                                                if conj {
+                                                    vfma231_conj!(
+                                                        zmm(m * j + i),
+                                                        zmm(m * n + i),
+                                                        [rhs_addr],
+                                                    );
+                                                } else {
+                                                    vfma231!(
+                                                        zmm(m * j + i),
+                                                        zmm(m * n + i),
+                                                        [rhs_addr],
+                                                    );
+                                                }
+
+                                                if n > 4 {
+                                                    if j + 1 == 4 {
+                                                        lea!(rhs, [rhs + rhs_cs * 4]);
+                                                    }
+                                                }
+
+                                                if j + 1 == n {
+                                                    if n > 4 {
+                                                        lea!(rhs, [rhs + rhs_neg_cs * 4]);
+                                                    }
+                                                    add!(rhs, rhs_rs);
+                                                }
+                                            } else {
+                                                if conj {
+                                                    vfma231_conj!(
+                                                        zmm(m * j + i),
+                                                        zmm(m * n + i),
+                                                        zmm(m * n + m),
+                                                    );
+                                                } else {
+                                                    vfma231!(
+                                                        zmm(m * j + i),
+                                                        zmm(m * n + i),
+                                                        zmm(m * n + m),
+                                                    );
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
-                            dec!(depth);
+                            if unroll == 1 {
+                                dec!(depth);
+                            } else {
+                                sub!(depth, unroll);
+                            }
                             jnz!(nanokernel);
                         }
                     }
@@ -1528,119 +1710,164 @@ impl Target {
                 mov!(rs, [dst + dst_rs]);
                 mov!(cs, [dst + dst_cs]);
 
-                alloca!(col);
-                imul!(col, cs);
-                add!(ptr, col);
-
-                alloca!(row);
-                imul!(row, rs);
-                add!(ptr, row);
-
                 {
-                    let alpha_ptr = row;
-                    let alpha_re = m * n;
-                    let alpha_im = m * n + 1;
-                    let mask_ = if simd.dedicated_mask() { 1 } else { m * n + 2 };
-                    let tmp = m * n + 3;
+                    reg!(row);
+                    reg!(col);
+                    mov!(row, [info + info_row]);
+                    mov!(col, [info + info_col]);
 
-                    if self.is_cplx() {
-                        vmov!(
-                            zmm(alpha_re),
-                            [rip + &format!("{*PREFIX} gemm.microkernel.{ty}.flip.re.data")]
-                        );
-                        vmov!(
-                            zmm(alpha_im),
-                            [rip + &format!("{*PREFIX} gemm.microkernel.{ty}.flip.im.data")]
-                        );
-                        bt!([info + info_flags], 1);
-                        jnc!(no_conj_lhs);
+                    imul!(col, cs);
+                    add!(ptr, col);
 
-                        label!(conj_lhs);
-                        {
-                            bt!([info + info_flags], 2);
-                            jc!(conj_lhs_no_conj_rhs);
+                    imul!(row, rs);
+                    add!(ptr, row);
 
-                            label!(conj_lhs_conj_rhs);
+                    {
+                        let alpha_ptr = row;
+                        let alpha_re = m * n;
+                        let alpha_im = m * n + 1;
+                        let mask_ = if simd.dedicated_mask() { 1 } else { m * n + 2 };
+                        let tmp = m * n + 3;
+
+                        if self.is_cplx() {
+                            vmov!(
+                                zmm(alpha_re),
+                                [rip + &format!("{*PREFIX} gemm.microkernel.{ty}.flip.re.data")]
+                            );
+                            vmov!(
+                                zmm(alpha_im),
+                                [rip + &format!("{*PREFIX} gemm.microkernel.{ty}.flip.im.data")]
+                            );
+                            bt!([info + info_flags], 1);
+                            jnc!(no_conj_lhs);
+
+                            label!(conj_lhs);
                             {
-                                vxor!(zmm(alpha_re), zmm(alpha_re), zmm(alpha_im));
-                                jmp!(xor);
+                                bt!([info + info_flags], 2);
+                                jc!(conj_lhs_no_conj_rhs);
+
+                                label!(conj_lhs_conj_rhs);
+                                {
+                                    vxor!(zmm(alpha_re), zmm(alpha_re), zmm(alpha_im));
+                                    jmp!(xor);
+                                }
+                                label!(conj_lhs_no_conj_rhs);
+                                {
+                                    vxor!(zmm(alpha_re), zmm(alpha_re), zmm(alpha_re));
+                                    jmp!(xor);
+                                }
                             }
-                            label!(conj_lhs_no_conj_rhs);
+
+                            label!(no_conj_lhs);
                             {
-                                vxor!(zmm(alpha_re), zmm(alpha_re), zmm(alpha_re));
-                                jmp!(xor);
+                                bt!([info + info_flags], 2);
+                                jnc!(no_conj_lhs_no_conj_rhs);
+
+                                label!(no_conj_lhs_conj_rhs);
+                                {
+                                    vmov!(zmm(alpha_re), zmm(alpha_im));
+                                    jmp!(xor);
+                                }
+                                label!(no_conj_lhs_no_conj_rhs);
+                                {}
+                            }
+                            label!(xor);
+                            for i in 0..m * n {
+                                vxor!(zmm(i), zmm(i), zmm(alpha_re));
                             }
                         }
 
-                        label!(no_conj_lhs);
-                        {
-                            bt!([info + info_flags], 2);
-                            jnc!(no_conj_lhs_no_conj_rhs);
-
-                            label!(no_conj_lhs_conj_rhs);
-                            {
-                                vmov!(zmm(alpha_re), zmm(alpha_im));
-                                jmp!(xor);
-                            }
-                            label!(no_conj_lhs_no_conj_rhs);
-                            {}
+                        mov!(alpha_ptr, [info + info_alpha]);
+                        vbroadcast!(zmm(alpha_re), [alpha_ptr]);
+                        if self.is_cplx() {
+                            vbroadcast!(zmm(alpha_im), [alpha_ptr + ty.sizeof() / 2]);
                         }
-                        label!(xor);
-                        for i in 0..m * n {
-                            vxor!(zmm(i), zmm(i), zmm(alpha_re));
+
+                        if mask {
+                            kmov!(k(mask_), [mask_ptr]);
                         }
-                    }
 
-                    mov!(alpha_ptr, [info + info_alpha]);
-                    vbroadcast!(zmm(alpha_re), [alpha_ptr]);
-                    if self.is_cplx() {
-                        vbroadcast!(zmm(alpha_im), [alpha_ptr + ty.sizeof() / 2]);
-                    }
+                        for j in 0..n {
+                            for i in 0..m {
+                                let src = m * j + i;
+                                let ptr = ptr + simd.sizeof() * i;
 
-                    kmov!(k(mask_), [mask_ptr]);
+                                if self.is_cplx() || !add {
+                                    if self.is_cplx() {
+                                        vswap!(zmm(src));
+                                        vmul!(zmm(tmp), zmm(src), zmm(alpha_im));
+                                        vswap!(zmm(src));
+                                        vfma231!(zmm(tmp), zmm(src), zmm(alpha_re));
+                                        vmov!(zmm(src), zmm(tmp));
+                                    } else {
+                                        vmul!(zmm(src), zmm(src), zmm(alpha_re));
+                                    }
+                                };
 
-                    for j in 0..n {
-                        for i in 0..m {
-                            let src = m * j + i;
-                            let ptr = ptr + simd.sizeof() * i;
-
-                            if self.is_cplx() || !add {
-                                if self.is_cplx() {
-                                    vswap!(zmm(src));
-                                    vmul!(zmm(tmp), zmm(src), zmm(alpha_im));
-                                    vswap!(zmm(src));
-                                    vfma231!(zmm(tmp), zmm(src), zmm(alpha_re));
-                                    vmov!(zmm(src), zmm(tmp));
+                                if !mask || i + 1 < m {
+                                    if add {
+                                        if self.is_cplx() {
+                                            vadd!(zmm(src), zmm(alpha_re), [ptr]);
+                                        } else {
+                                            vfma213!(zmm(src), zmm(alpha_re), [ptr]);
+                                        }
+                                    }
+                                    vmov!([ptr], zmm(src));
                                 } else {
-                                    vmul!(zmm(src), zmm(src), zmm(alpha_re));
-                                }
-                            };
+                                    if add {
+                                        vmov!(zmm(tmp)[mask_], [ptr]);
 
-                            if !mask || i + 1 < m {
-                                if add {
-                                    if self.is_cplx() {
-                                        vadd!(zmm(src), zmm(alpha_re), [ptr]);
-                                    } else {
-                                        vfma213!(zmm(src), zmm(alpha_re), [ptr]);
+                                        if self.is_cplx() {
+                                            vadd!(zmm(src), zmm(src), zmm(tmp));
+                                        } else {
+                                            vfma213!(zmm(src), zmm(alpha_re), zmm(tmp));
+                                        }
                                     }
+                                    vmov!([ptr][mask_], zmm(src));
                                 }
-                                vmov!([ptr], zmm(src));
-                            } else {
-                                if add {
-                                    vmov!(zmm(tmp)[mask_], [ptr]);
-
-                                    if self.is_cplx() {
-                                        vadd!(zmm(src), zmm(src), zmm(tmp));
-                                    } else {
-                                        vfma213!(zmm(src), zmm(alpha_re), zmm(tmp));
-                                    }
-                                }
-                                vmov!([ptr][mask_], zmm(src));
                             }
+                            add!(ptr, cs);
                         }
-                        add!(ptr, cs);
                     }
                 }
+                bt!([rsi], 63);
+                jc!(rowmajor);
+
+                label!(colmajor);
+                {
+                    add!([info + info_row], nrows);
+
+                    if mask {
+                        add!([info + info_col], n);
+
+                        mov!(nrows, 0);
+                        sub!(ncols, n);
+                    } else {
+                        sub!(nrows, m * self.len());
+                        jnz!(end);
+
+                        sub!(ncols, n);
+                        add!([info + info_col], n);
+                    }
+                }
+                jmp!(end);
+
+                label!(rowmajor);
+                {
+                    add!([info + info_col], n);
+                    sub!(ncols, n);
+
+                    jnz!(end);
+
+                    add!([info + info_row], nrows);
+                    if mask {
+                        mov!(nrows, 0);
+                    } else {
+                        sub!(nrows, m * self.len());
+                    }
+                }
+
+                label!(end);
             }
         }
 
@@ -1655,6 +1882,11 @@ fn main() -> Result {
     let mut c32_simd512 = vec![];
     let mut f64_simd512 = vec![];
     let mut c64_simd512 = vec![];
+
+    let mut f32_simd512x8 = vec![];
+    let mut c32_simd512x8 = vec![];
+    let mut f64_simd512x8 = vec![];
+    let mut c64_simd512x8 = vec![];
 
     let mut f32_simd256 = vec![];
     let mut c32_simd256 = vec![];
@@ -1678,8 +1910,10 @@ fn main() -> Result {
         (&mut f64_simd512, Ty::F64),
         (&mut c64_simd512, Ty::C64),
     ] {
-        for n in 1..=4 {
-            for m in 1..=6 {
+        for m in (1..=6).rev() {
+            let last = if m == 1 { 8 } else { 4 };
+
+            for n in 1..=last {
                 let target = Target {
                     ty,
                     simd: Simd::_512,
@@ -1693,13 +1927,37 @@ fn main() -> Result {
     }
 
     for (out, ty) in [
+        (&mut f32_simd512x8, Ty::F32),
+        (&mut c32_simd512x8, Ty::C32),
+        (&mut f64_simd512x8, Ty::F64),
+        (&mut c64_simd512x8, Ty::C64),
+    ] {
+        for m in (1..=3).rev() {
+            for n in 1..=8 {
+                let target = Target {
+                    ty,
+                    simd: Simd::_512,
+                };
+
+                let (name, f) = target.microkernel(m, n);
+                if m > 1 && n > 4 {
+                    code += &f;
+                }
+                out.push(name);
+            }
+        }
+    }
+
+    for (out, ty) in [
         (&mut f32_simd256, Ty::F32),
         (&mut c32_simd256, Ty::C32),
         (&mut f64_simd256, Ty::F64),
         (&mut c64_simd256, Ty::C64),
     ] {
-        for n in 1..=4 {
-            for m in 1..=3 {
+        for m in (1..=3).rev() {
+            let last = if m == 1 { 8 } else { 4 };
+
+            for n in 1..=last {
                 let target = Target {
                     ty,
                     simd: Simd::_256,
@@ -1722,8 +1980,8 @@ fn main() -> Result {
         (&mut f64_simd64, Ty::F64, Simd::_64),
         (&mut f32_simd32, Ty::F32, Simd::_32),
     ] {
-        for n in 1..=4 {
-            for m in 1..=1 {
+        for m in (1..=1).rev() {
+            for n in 1..=8 {
                 let target = Target { ty, simd };
 
                 let (name, f) = target.microkernel(m, n);
@@ -1745,14 +2003,25 @@ fn main() -> Result {
         );
 
         for (names, ty, bits) in [
-            (&f32_simd512, Ty::F32, 512),
-            (&c32_simd512, Ty::C32, 512),
-            (&f64_simd512, Ty::F64, 512),
-            (&c64_simd512, Ty::C64, 512),
-            (&f32_simd256, Ty::F32, 256),
-            (&c32_simd256, Ty::C32, 256),
-            (&f64_simd256, Ty::F64, 256),
-            (&c64_simd256, Ty::C64, 256),
+            (&f32_simd512x8, Ty::F32, "512x8"),
+            (&c32_simd512x8, Ty::C32, "512x8"),
+            (&f64_simd512x8, Ty::F64, "512x8"),
+            (&c64_simd512x8, Ty::C64, "512x8"),
+            (&f32_simd512, Ty::F32, "512x4"),
+            (&c32_simd512, Ty::C32, "512x4"),
+            (&f64_simd512, Ty::F64, "512x4"),
+            (&c64_simd512, Ty::C64, "512x4"),
+            (&f32_simd256, Ty::F32, "256"),
+            (&c32_simd256, Ty::C32, "256"),
+            (&f64_simd256, Ty::F64, "256"),
+            (&c64_simd256, Ty::C64, "256"),
+            (&f32_simd128, Ty::F32, "128"),
+            (&c32_simd128, Ty::C32, "128"),
+            (&f64_simd128, Ty::F64, "128"),
+            (&c64_simd128, Ty::C64, "128"),
+            (&f32_simd64, Ty::F32, "64"),
+            (&c32_simd64, Ty::C32, "64"),
+            (&f64_simd64, Ty::F64, "64"),
         ] {
             for (i, name) in names.iter().enumerate() {
                 code += &format!(

@@ -1,5 +1,10 @@
 #![no_std]
+#![allow(non_upper_case_globals)]
+
+use core::ptr::{null, null_mut};
+
 extern crate std;
+use std::dbg;
 
 include!(concat!(env!("OUT_DIR"), "/asm.rs"));
 
@@ -12,9 +17,19 @@ pub struct MicrokernelInfo {
     pub lhs_cs: isize,
     pub rhs_rs: isize,
     pub rhs_cs: isize,
-    pub __pad_0__: usize,
-    pub __pad_1__: usize,
+    pub row: usize,
+    pub col: usize,
     pub alpha: *const (),
+}
+
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub struct MillikernelInfo {
+    pub lhs_rs: isize,
+    pub packed_lhs_rs: isize,
+    pub rhs_cs: isize,
+    pub packed_rhs_cs: isize,
+    pub micro: MicrokernelInfo,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -27,7 +42,239 @@ pub struct Dst {
     pub col_idx: *const (),
 }
 
-pub unsafe fn millikernel(
+pub unsafe fn millikernel2(
+    microkernel: unsafe extern "C" fn(),
+
+    lhs: *const (),
+    packed_lhs: *mut (),
+
+    rhs: *const (),
+    packed_rhs: *mut (),
+
+    nrows: usize,
+    ncols: usize,
+
+    milli: &mut MillikernelInfo,
+
+    dst: &Dst,
+) {
+    unsafe {
+        core::arch::asm! {
+            "push rbx",
+            "push r8",
+            "push r9",
+            "mov rbx, r15",
+
+            "test r8, r8",
+            "jz 22f",
+            "test r9, r9",
+            "jz 22f",
+
+            "bt qword ptr [rsi], 63",
+            "jc 21f",
+
+            // for j in .. { for i in .. { } }
+            "push rcx",
+            "push rdx",
+            "push rax",
+            "push qword ptr [rsi - 32]",
+            "push qword ptr [rsi + 16]",
+
+                ".align 16",
+                "200:",
+                "push rax",
+                "push rbx",
+                "push rcx",
+                "push r8",
+                "push qword ptr [rsi + 32]",
+                "push qword ptr [rsi + 40]",
+                "push qword ptr [rsi + 48]",
+
+                    "cmp rcx, rdx",
+                    "jz 2000f",
+
+                    "call r10",
+                    "add rax, [rsi - 32]",
+                    "add rbx, [rsi - 24]",
+                    "mov rcx, rdx",
+                    "mov qword ptr [rsi + 40], 0",
+                    "test r8, r8",
+                    "jz 201f",
+
+                    ".align 16",
+                    "2000:",
+                    "call r10",
+                    "add rax, [rsi - 32]",
+                    "add rbx, [rsi - 24]",
+                    "test r8, r8",
+                    "jnz 2000b",
+
+                "201:",
+                "pop qword ptr [rsi + 48]",
+                "pop qword ptr [rsi + 40]",
+                "pop qword ptr [rsi + 32]",
+                "pop r8",
+                "pop rcx",
+                "pop rbx",
+                "pop rax",
+
+                "test r9, r9",
+                "jz 20f",
+
+                "add rcx, [rsi - 16]",
+                "add rdx, [rsi - 8]",
+
+                "cmp rax, rbx",
+                "jz 200b",
+                "cmp qword ptr [rsi - 24], 0",
+                "jz 200b",
+
+                "mov rax, rbx",
+                "mov r15, [rsi - 24]",
+                "mov [rsi - 32], r15",
+                "xor r15, r15",
+                "mov [rsi + 16], r15",
+                "jmp 200b",
+
+            ".align 16",
+            "20:",
+            "pop qword ptr [rsi + 16]",
+            "pop qword ptr [rsi - 32]",
+            "pop rax",
+            "pop rdx",
+            "pop rcx",
+
+            "jmp 22f",
+
+            ".align 16",
+            "21:",
+            // for i in .. { for j in .. { } }
+            "push rax",
+            "push rbx",
+            "push rcx",
+            "push qword ptr [rsi - 16]",
+            "push qword ptr [rsi + 40]",
+
+                ".align 16",
+                "200:",
+                "push rcx",
+                "push rdx",
+                "push rax",
+                "push r9",
+                "push qword ptr [rsi + 16]",
+                "push qword ptr [rsi + 24]",
+                "push qword ptr [rsi + 56]",
+
+                    "cmp rax, rbx",
+                    "jz 2000f",
+
+                    "call r10",
+                    "add rcx, [rsi - 16]",
+                    "add rdx, [rsi - 8]",
+                    "mov rax, rbx",
+                    "mov qword ptr [rsi + 16], 0",
+                    "test r9, r9",
+                    "jz 201f",
+
+                    ".align 16",
+                    "2000:",
+                    "call r10",
+                    "add rcx, [rsi - 16]",
+                    "add rdx, [rsi - 8]",
+                    "test r9, r9",
+                    "jnz 2000b",
+
+                "201:",
+                "pop qword ptr [rsi + 56]",
+                "pop qword ptr [rsi + 24]",
+                "pop qword ptr [rsi + 16]",
+                "pop r9",
+                "pop rax",
+                "pop rdx",
+                "pop rcx",
+
+                "test r8, r8",
+                "jz 20f",
+
+                "add rax, [rsi - 32]",
+                "add rbx, [rsi - 24]",
+
+                "cmp rcx, rdx",
+                "jz 200b",
+                "cmp qword ptr [rsi - 8], 0",
+                "jz 200b",
+
+                "mov rcx, rdx",
+                "mov r15, [rsi - 8]",
+                "mov [rsi - 16], r15",
+                "xor r15, r15",
+                "mov [rsi + 40], r15",
+                "jmp 200b",
+
+            ".align 16",
+            "20:",
+            "pop qword ptr [rsi + 40]",
+            "pop qword ptr [rsi - 16]",
+            "pop rcx",
+            "pop rbx",
+            "pop rax",
+
+            ".align 16",
+            "22:",
+            "mov r15, rbx",
+            "pop r9",
+            "pop r8",
+            "pop rbx",
+
+            in("rax") lhs,
+            in("r15") packed_lhs, // rbx
+            in("rcx") rhs,
+            in("rdx") packed_rhs,
+            in("rdi") dst,
+            in("rsi") &raw mut milli.micro,
+            in("r8") nrows,
+            in("r9") ncols,
+
+            in("r10") microkernel,
+
+            out("zmm0") _,
+            out("zmm1") _,
+            out("zmm2") _,
+            out("zmm3") _,
+            out("zmm4") _,
+            out("zmm5") _,
+            out("zmm6") _,
+            out("zmm7") _,
+            out("zmm8") _,
+            out("zmm9") _,
+            out("zmm10") _,
+            out("zmm11") _,
+            out("zmm12") _,
+            out("zmm13") _,
+            out("zmm14") _,
+            out("zmm15") _,
+            out("zmm16") _,
+            out("zmm17") _,
+            out("zmm18") _,
+            out("zmm19") _,
+            out("zmm20") _,
+            out("zmm21") _,
+            out("zmm22") _,
+            out("zmm23") _,
+            out("zmm24") _,
+            out("zmm25") _,
+            out("zmm26") _,
+            out("zmm27") _,
+            out("zmm28") _,
+            out("zmm29") _,
+            out("zmm30") _,
+            out("zmm31") _,
+            out("k1") _,
+        }
+    };
+}
+
+pub unsafe fn millikernel<const NR: usize>(
     microkernel: unsafe extern "C" fn(),
 
     lhs: *const (),
@@ -51,6 +298,7 @@ pub unsafe fn millikernel(
         core::arch::asm! {
             "push rbx",
             "push rbp",
+            "push rsi",
             "mov rbx, r8",
             "mov rbp, r9",
 
@@ -63,8 +311,11 @@ pub unsafe fn millikernel(
             "call r10",
             "add rcx, r11",
             "add rdx, r13",
-            "add r15, 4",
+            "mov rsi, [rsp]",
+            "add r15, {NR}",
             "mov rax, rbx",
+            "mov qword ptr [r9 + 16], 0",
+            "mov qword ptr [r9 + 24], 0",
             "dec r12",
             "jz 5f",
 
@@ -73,12 +324,14 @@ pub unsafe fn millikernel(
             "call r10",
             "add rcx, r11",
             "add rdx, r13",
-            "add r15, 4",
+            "mov rsi, [rsp]",
+            "add r15, {NR}",
 
             "dec r12",
             "jnz 2b",
 
             "5:",
+            "pop rsi",
             "pop rbp",
             "pop rbx",
 
@@ -95,6 +348,7 @@ pub unsafe fn millikernel(
             in("r13") packed_rhs_cs,
             in("r14") row,
             inout("r15") col => _,
+            NR = const NR,
 
             out("zmm0") _,
             out("zmm1") _,
@@ -134,10 +388,11 @@ pub unsafe fn millikernel(
 }
 
 #[inline(never)]
-pub unsafe fn kernel<'a>(
+pub unsafe fn kernel2<'a>(
     microkernel: &'a [unsafe extern "C" fn()],
     len: usize,
     sizeof: usize,
+    nr: usize,
 
     lhs: *const (),
     packed_lhs: *mut (),
@@ -161,16 +416,230 @@ pub unsafe fn kernel<'a>(
     dst: &'a Dst,
     info: &'a mut MicrokernelInfo,
 ) {
+    let mut stack: [(
+        *const (),
+        *mut (),
+        *const (),
+        *mut (),
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        bool,
+        bool,
+    ); 16] = [(
+        null(),
+        null_mut(),
+        null(),
+        null_mut(),
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        false,
+        false,
+    ); 16];
+
+    stack[0] = (
+        lhs, packed_lhs, rhs, packed_rhs, row, col, nrows, ncols, 0, 0, false, false,
+    );
+
+    let mut depth = 0;
+    let max_depth = row_chunk.len();
+
+    let milli_rs = *lhs_rs.last().unwrap();
+    let milli_cs = *rhs_cs.last().unwrap();
+
+    let micro_rs = info.lhs_rs;
+    let micro_cs = info.rhs_cs;
+
+    let mut milli = MillikernelInfo {
+        lhs_rs: milli_rs,
+        packed_lhs_rs: *packed_lhs_rs.last().unwrap(),
+        rhs_cs: milli_cs,
+        packed_rhs_cs: *packed_rhs_cs.last().unwrap(),
+        micro: *info,
+    };
+    let microkernel = microkernel[nr - 1];
+
+    let q = row_chunk.len();
+    let row_chunk = &row_chunk[..q - 1];
+    let col_chunk = &col_chunk[..q - 1];
+    let lhs_rs = &lhs_rs[..q];
+    let packed_lhs_rs = &packed_lhs_rs[..q];
+    let rhs_cs = &rhs_cs[..q];
+    let packed_rhs_cs = &packed_rhs_cs[..q];
+
+    loop {
+        let (
+            lhs,
+            packed_lhs,
+            rhs,
+            packed_rhs,
+            row,
+            col,
+            nrows,
+            ncols,
+            i,
+            j,
+            is_packed_lhs,
+            is_packed_rhs,
+        ) = stack[depth];
+
+        if depth + 1 == max_depth {
+            let mut lhs = lhs;
+            let mut rhs = rhs;
+
+            milli.micro.row = row;
+            milli.micro.col = col;
+
+            if is_packed_lhs && lhs != packed_lhs {
+                lhs = packed_lhs;
+                milli.micro.lhs_rs = 0;
+                milli.lhs_rs = milli.packed_lhs_rs;
+            }
+            if is_packed_rhs && rhs != packed_rhs {
+                rhs = packed_rhs;
+                milli.micro.rhs_cs = 0;
+                milli.rhs_cs = milli.packed_rhs_cs;
+            }
+
+            unsafe {
+                millikernel2(
+                    microkernel,
+                    lhs,
+                    packed_lhs,
+                    rhs,
+                    packed_rhs,
+                    nrows,
+                    ncols,
+                    &mut milli,
+                    dst,
+                );
+            }
+            milli.lhs_rs = milli_rs;
+            milli.rhs_cs = milli_cs;
+            milli.micro.lhs_rs = micro_rs;
+            milli.micro.rhs_cs = micro_cs;
+
+            while depth > 0 {
+                depth -= 1;
+
+                let (_, _, _, _, _, _, nrows, ncols, i, j, _, _) = &mut stack[depth];
+
+                let col_chunk = col_chunk[depth];
+                let row_chunk = row_chunk[depth];
+
+                let j_chunk = Ord::min(col_chunk, *ncols - *j);
+                let i_chunk = Ord::min(row_chunk, *nrows - *i);
+
+                if milli.micro.flags >> 63 == 0 {
+                    *i += i_chunk;
+                    if *i == *nrows {
+                        *i = 0;
+                        *j += j_chunk;
+
+                        if *j == *ncols {
+                            *j = 0;
+                            continue;
+                        }
+                    }
+                } else {
+                    *j += j_chunk;
+                    if *j == *ncols {
+                        *j = 0;
+                        *i += i_chunk;
+
+                        if *i == *nrows {
+                            *i = 0;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+        } else {
+            let col_chunk = col_chunk[depth];
+            let row_chunk = row_chunk[depth];
+            let rhs_cs = rhs_cs[depth];
+            let lhs_rs = lhs_rs[depth];
+            let prhs_cs = packed_rhs_cs[depth];
+            let plhs_rs = packed_lhs_rs[depth];
+
+            let j_chunk = Ord::min(col_chunk, ncols - j);
+            let i_chunk = Ord::min(row_chunk, nrows - i);
+
+            depth += 1;
+            stack[depth] = (
+                lhs.wrapping_byte_offset(lhs_rs * (i / row_chunk) as isize),
+                packed_lhs.wrapping_byte_offset(plhs_rs * (i / row_chunk) as isize),
+                rhs.wrapping_byte_offset(rhs_cs * (j / col_chunk) as isize),
+                packed_rhs.wrapping_byte_offset(prhs_cs * (j / col_chunk) as isize),
+                row + i,
+                col + j,
+                i_chunk,
+                j_chunk,
+                0,
+                0,
+                is_packed_lhs || (j > 0 && packed_lhs_rs[depth] != 0),
+                is_packed_rhs || (i > 0 && packed_rhs_cs[depth] != 0),
+            );
+            continue;
+        }
+
+        if depth == 0 {
+            break;
+        }
+    }
+}
+
+#[inline(never)]
+pub unsafe fn kernel<'a>(
+    microkernel: &'a [unsafe extern "C" fn()],
+    len: usize,
+    sizeof: usize,
+    nr: usize,
+
+    lhs: *const (),
+    packed_lhs: *mut (),
+
+    rhs: *const (),
+    packed_rhs: *mut (),
+
+    nrows: usize,
+    ncols: usize,
+
+    row_chunk: &'a [usize],
+    col_chunk: &'a [usize],
+    lhs_rs: &'a [isize],
+    rhs_cs: &'a [isize],
+    packed_lhs_rs: &'a [isize],
+    packed_rhs_cs: &'a [isize],
+
+    row: usize,
+    col: usize,
+
+    dst: &'a Dst,
+    info: &'a mut MicrokernelInfo,
+    rev: &mut [bool],
+) {
     let mut lhs = lhs;
-    let mut rhs = rhs;
-    let mut packed_rhs = packed_rhs;
     let mut lhs_rs = lhs_rs;
 
     assert!(row_chunk.len() <= col_chunk.len());
 
     if row_chunk.len() == 0 {
         assert!(col_chunk.len() == 1);
-        assert_eq!(col_chunk[0], 4);
+        assert_eq!(col_chunk[0], nr);
+        let millikernel = if nr == 8 {
+            millikernel::<8>
+        } else {
+            millikernel::<4>
+        };
 
         unsafe {
             let old = info.lhs_cs;
@@ -179,10 +648,33 @@ pub unsafe fn kernel<'a>(
                 info.lhs_cs = (nrows.next_multiple_of(len) * sizeof) as isize;
             }
 
-            if ncols < 4 {
+            let mr = microkernel.len() / nr;
+            let i = mr - nrows.div_ceil(len);
+
+            if ncols >= nr {
                 millikernel(
-                    microkernel[nrows.div_ceil(len) - 1 + (ncols - 1) * (microkernel.len() / 4)],
+                    microkernel[nr * i + nr - 1],
                     lhs,
+                    packed_lhs,
+                    rhs,
+                    packed_rhs,
+                    ncols / nr,
+                    rhs_cs[0],
+                    packed_rhs_cs[0],
+                    dst,
+                    row,
+                    col,
+                    nrows,
+                    info,
+                );
+            }
+            if ncols % nr != 0 {
+                let rhs = rhs.wrapping_byte_offset((ncols / nr) as isize * rhs_cs[0]);
+                let packed_rhs =
+                    packed_rhs.wrapping_byte_offset((ncols / nr) as isize * packed_rhs_cs[0]);
+                millikernel(
+                    microkernel[nr * i + ncols % nr - 1],
+                    packed_lhs,
                     packed_lhs,
                     rhs,
                     packed_rhs,
@@ -191,52 +683,14 @@ pub unsafe fn kernel<'a>(
                     packed_rhs_cs[0],
                     dst,
                     row,
-                    col,
+                    col + ncols / nr * nr,
                     nrows,
                     info,
                 );
-            } else {
-                millikernel(
-                    microkernel[nrows.div_ceil(len) - 1 + (4 - 1) * (microkernel.len() / 4)],
-                    lhs,
-                    packed_lhs,
-                    rhs,
-                    packed_rhs,
-                    ncols / 4,
-                    rhs_cs[0],
-                    packed_rhs_cs[0],
-                    dst,
-                    row,
-                    col,
-                    nrows,
-                    info,
-                );
-                if ncols % 4 != 0 {
-                    let rhs = rhs.wrapping_byte_offset((ncols / 4) as isize * rhs_cs[0]);
-                    let packed_rhs =
-                        packed_rhs.wrapping_byte_offset((ncols / 4) as isize * packed_rhs_cs[0]);
-                    millikernel(
-                        microkernel
-                            [nrows.div_ceil(len) - 1 + (ncols % 4 - 1) * (microkernel.len() / 4)],
-                        packed_lhs,
-                        packed_lhs,
-                        rhs,
-                        packed_rhs,
-                        1,
-                        rhs_cs[0],
-                        packed_rhs_cs[0],
-                        dst,
-                        row,
-                        col + ncols / 4 * 4,
-                        nrows,
-                        info,
-                    );
-                }
             }
-            info.lhs_cs = old;
 
             if packed_rhs != rhs as _ && packed_rhs_cs[0] != 0 {
-                info.rhs_rs = 4 * sizeof as isize;
+                info.rhs_rs = (nr * sizeof) as isize;
                 info.rhs_cs = sizeof as isize;
             }
         }
@@ -247,23 +701,32 @@ pub unsafe fn kernel<'a>(
         let (&first_rhs_cs, rhs_cs) = rhs_cs.split_first().unwrap();
         let (&first_packed_rhs_cs, packed_rhs_cs) = packed_rhs_cs.split_first().unwrap();
 
-        let mut j = 0;
+        let mut j = if rev[0] { ncols } else { 0 };
         loop {
+            if rev[0] {
+                j = (j - 1) / first_col_chunk * first_col_chunk;
+            }
+
             let c_chunk = Ord::min(first_col_chunk, ncols - j);
             let old = (info.rhs_rs, info.rhs_cs);
 
             unsafe {
-                let mut lhs = lhs;
-                let mut packed_lhs = packed_lhs;
-                let mut rhs = rhs;
                 let mut rhs_cs = rhs_cs;
+                let mut rhs =
+                    rhs.wrapping_byte_offset(first_rhs_cs * (j / first_col_chunk) as isize);
+                let packed_rhs = packed_rhs
+                    .wrapping_byte_offset(first_packed_rhs_cs * (j / first_col_chunk) as isize);
 
                 let (&first_row_chunk, row_chunk) = row_chunk.split_first().unwrap();
                 let (&first_lhs_rs, lhs_rs) = lhs_rs.split_first().unwrap();
                 let (&first_packed_lhs_rs, packed_lhs_rs) = packed_lhs_rs.split_first().unwrap();
 
-                let mut i = 0;
+                let mut i = if rev[1] { nrows } else { 0 };
                 loop {
+                    if rev[1] {
+                        i = (i - 1) / first_row_chunk * first_row_chunk;
+                    }
+
                     let r_chunk = Ord::min(first_row_chunk, nrows - i);
 
                     let old = (info.lhs_rs, info.lhs_cs);
@@ -272,8 +735,11 @@ pub unsafe fn kernel<'a>(
                         microkernel,
                         len,
                         sizeof,
-                        lhs,
-                        packed_lhs,
+                        nr,
+                        lhs.wrapping_byte_offset(first_lhs_rs * (i / first_row_chunk) as isize),
+                        packed_lhs.wrapping_byte_offset(
+                            first_packed_lhs_rs * (i / first_row_chunk) as isize,
+                        ),
                         rhs,
                         packed_rhs,
                         r_chunk,
@@ -288,14 +754,19 @@ pub unsafe fn kernel<'a>(
                         col + j,
                         dst,
                         info,
+                        &mut rev[2..],
                     );
-                    lhs = lhs.wrapping_byte_offset(first_lhs_rs);
-                    packed_lhs = packed_lhs.wrapping_byte_offset(first_packed_lhs_rs);
                     (info.lhs_rs, info.lhs_cs) = old;
 
-                    i += r_chunk;
-                    if i == nrows {
-                        break;
+                    if rev[1] {
+                        if i == 0 {
+                            break;
+                        }
+                    } else {
+                        i += r_chunk;
+                        if i == nrows {
+                            break;
+                        }
                     }
 
                     if packed_rhs_cs[0] != 0 && rhs != packed_rhs {
@@ -303,19 +774,26 @@ pub unsafe fn kernel<'a>(
                         rhs_cs = packed_rhs_cs;
                     }
                 }
+                if nrows >= usize::MAX {
+                    rev[1] = !rev[1];
+                }
                 if lhs != packed_lhs && first_packed_lhs_rs != 0 {
                     info.lhs_rs = sizeof as isize;
                     info.lhs_cs = isize::MIN;
                 }
             }
 
-            rhs = rhs.wrapping_byte_offset(first_rhs_cs);
-            packed_rhs = packed_rhs.wrapping_byte_offset(first_packed_rhs_cs);
             (info.rhs_rs, info.rhs_cs) = old;
 
-            j += c_chunk;
-            if j == ncols {
-                break;
+            if rev[0] {
+                if j == 0 {
+                    break;
+                }
+            } else {
+                j += c_chunk;
+                if j == ncols {
+                    break;
+                }
             }
 
             if packed_lhs_rs[0] != 0 && lhs != packed_lhs {
@@ -324,9 +802,12 @@ pub unsafe fn kernel<'a>(
             }
         }
         if rhs != packed_rhs && first_packed_rhs_cs != 0 {
-            info.rhs_rs = 4 * sizeof as isize;
+            info.rhs_rs = (nr * sizeof) as isize;
             info.rhs_cs = sizeof as isize;
         }
+    }
+    if ncols >= usize::MAX {
+        rev[0] = !rev[0];
     }
 }
 
@@ -383,8 +864,8 @@ mod tests_f64 {
                                 }
 
                                 unsafe {
-                                    millikernel(
-                                        F64_SIMD512[m.div_ceil(len) - 1 + ((n - 1) % 4) * 6],
+                                    millikernel::<4>(
+                                        F64_SIMD512x4[(6 - m.div_ceil(len)) * 4 + ((n - 1) % 4)],
                                         lhs.as_ptr() as _,
                                         if pack_lhs {
                                             packed_lhs.as_mut_ptr() as _
@@ -417,8 +898,8 @@ mod tests_f64 {
                                             lhs_cs: cs as isize * sizeof,
                                             rhs_rs: 1 * sizeof,
                                             rhs_cs: k as isize * sizeof,
-                                            __pad_0__: 0,
-                                            __pad_1__: 0,
+                                            row: 0,
+                                            col: 0,
                                             alpha: &raw const alpha as _,
                                         },
                                     )
@@ -492,9 +973,10 @@ mod tests_f64 {
                     let packed_rhs_cs = col_chunk.map(|n| (n * k) as isize * sizeof);
 
                     kernel(
-                        &F64_SIMD512,
+                        &F64_SIMD512x4[..24],
                         len,
                         sizeof as usize,
+                        4,
                         lhs.as_ptr() as _,
                         if pack_lhs {
                             packed_lhs.as_mut_ptr() as _
@@ -531,10 +1013,11 @@ mod tests_f64 {
                             lhs_cs: cs as isize * sizeof,
                             rhs_rs: sizeof,
                             rhs_cs: k as isize * sizeof,
-                            __pad_0__: 0,
-                            __pad_1__: 0,
+                            row: 0,
+                            col: 0,
                             alpha: &raw const *&1.0f64 as _,
                         },
+                        &mut [false; 32],
                     )
                 }
                 let mut i = 0;
@@ -619,9 +1102,9 @@ mod tests_c64 {
                                         }
 
                                         unsafe {
-                                            millikernel(
-                                                C64_SIMD512
-                                                    [m.div_ceil(len) - 1 + ((n - 1) % 4) * 6],
+                                            millikernel::<4>(
+                                                C64_SIMD512x4
+                                                    [(6 - m.div_ceil(len)) * 4 + ((n - 1) % 4)],
                                                 lhs.as_ptr() as _,
                                                 if pack_lhs {
                                                     packed_lhs.as_mut_ptr() as _
@@ -655,8 +1138,8 @@ mod tests_c64 {
                                                     lhs_cs: cs as isize * sizeof,
                                                     rhs_rs: 1 * sizeof,
                                                     rhs_cs: k as isize * sizeof,
-                                                    __pad_0__: 0,
-                                                    __pad_1__: 0,
+                                                    row: 0,
+                                                    col: 0,
                                                     alpha: &raw const alpha as _,
                                                 },
                                             )
@@ -733,8 +1216,8 @@ mod tests_f32 {
                                 }
 
                                 unsafe {
-                                    millikernel(
-                                        F32_SIMD512[m.div_ceil(len) - 1 + ((n - 1) % 4) * 6],
+                                    millikernel::<4>(
+                                        F32_SIMD512x4[(6 - m.div_ceil(len)) * 4 + ((n - 1) % 4)],
                                         lhs.as_ptr() as _,
                                         if pack_lhs {
                                             packed_lhs.as_mut_ptr() as _
@@ -767,8 +1250,8 @@ mod tests_f32 {
                                             lhs_cs: cs as isize * sizeof,
                                             rhs_rs: 1 * sizeof,
                                             rhs_cs: k as isize * sizeof,
-                                            __pad_0__: 0,
-                                            __pad_1__: 0,
+                                            row: 0,
+                                            col: 0,
                                             alpha: &raw const alpha as _,
                                         },
                                     )
@@ -784,8 +1267,8 @@ mod tests_f32 {
 
     #[test]
     fn test_avx512_kernel() {
-        let m = 1023usize;
-        let n = 1023usize;
+        let m = 6000usize;
+        let n = 2000usize;
         let k = 5usize;
 
         let rng = &mut StdRng::seed_from_u64(0);
@@ -827,24 +1310,27 @@ mod tests_f32 {
 
         for pack_lhs in [false, true] {
             for pack_rhs in [false, true] {
+                std::dbg!(pack_lhs, pack_rhs);
+
                 let dst = &mut *avec![0.0; cs * n];
                 let packed_lhs = &mut *avec![0.0f32; m.next_multiple_of(16) * k];
                 let packed_rhs =
                     &mut *avec![0.0; if pack_rhs { n.next_multiple_of(4) * k } else { 0 }];
 
                 unsafe {
-                    let row_chunk = [96 * 32, 96 * 16, 96];
-                    let col_chunk = [96 * 64, 96 * 32, 96, 4];
+                    let row_chunk = [m, 96 * 32, 96 * 16, 96 * 4, 96];
+                    let col_chunk = [n, 1024, 256, 64, 16, 4];
 
                     let lhs_rs = row_chunk.map(|m| m as isize * sizeof);
                     let rhs_cs = col_chunk.map(|n| (n * k) as isize * sizeof);
                     let packed_lhs_rs = row_chunk.map(|m| (m * k) as isize * sizeof);
                     let packed_rhs_cs = col_chunk.map(|n| (n * k) as isize * sizeof);
 
-                    kernel(
-                        &F32_SIMD512,
+                    kernel2(
+                        &F32_SIMD512x4[..24],
                         len,
                         sizeof as usize,
+                        4,
                         lhs.as_ptr() as _,
                         if pack_lhs {
                             packed_lhs.as_mut_ptr() as _
@@ -881,10 +1367,11 @@ mod tests_f32 {
                             lhs_cs: cs as isize * sizeof,
                             rhs_rs: sizeof,
                             rhs_cs: k as isize * sizeof,
-                            __pad_0__: 0,
-                            __pad_1__: 0,
+                            row: 0,
+                            col: 0,
                             alpha: &raw const *&1.0f32 as _,
                         },
+                        // &mut [false; 32],
                     )
                 }
                 let mut i = 0;
@@ -969,9 +1456,9 @@ mod tests_c32 {
                                         }
 
                                         unsafe {
-                                            millikernel(
-                                                C32_SIMD512
-                                                    [m.div_ceil(len) - 1 + ((n - 1) % 4) * 6],
+                                            millikernel::<4>(
+                                                C32_SIMD512x4
+                                                    [(6 - m.div_ceil(len)) * 4 + ((n - 1) % 4)],
                                                 lhs.as_ptr() as _,
                                                 if pack_lhs {
                                                     packed_lhs.as_mut_ptr() as _
@@ -1005,8 +1492,8 @@ mod tests_c32 {
                                                     lhs_cs: cs as isize * sizeof,
                                                     rhs_rs: 1 * sizeof,
                                                     rhs_cs: k as isize * sizeof,
-                                                    __pad_0__: 0,
-                                                    __pad_1__: 0,
+                                                    row: 0,
+                                                    col: 0,
                                                     alpha: &raw const alpha as _,
                                                 },
                                             )
