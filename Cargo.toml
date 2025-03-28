@@ -8,7 +8,7 @@ edition = "2024"
 [dev-dependencies]
 aligned-vec = "0.6.4"
 bytemuck = "1.22.0"
-diol = { version = "0.10" }
+diol = { version = "0.12" }
 gemm = { path = "../gemm/gemm", features = ["nightly"] }
 gemm-common = { version = "0.18.2", features = ["nightly"] }
 rand = "0.9.0"

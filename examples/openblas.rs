@@ -6,7 +6,7 @@ extern crate openblas_src;
 
 fn bench_blas(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
     let rng = &mut StdRng::seed_from_u64(0);
-    let mut cs = m.next_multiple_of(8);
+    let mut cs = Ord::min(m.next_power_of_two(), m.next_multiple_of(8));
     if m > 48 {
         cs = Ord::max(4096, cs);
     }
@@ -41,7 +41,7 @@ fn bench_blas(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
 }
 
 fn main() -> eyre::Result<()> {
-    let mut config = BenchConfig::from_args()?;
+    let mut config = Config::from_args()?;
 
     for k in [64, 128, 256, 512] {
         let mut args_small: [_; 16] = core::array::from_fn(|i| {
@@ -70,7 +70,6 @@ fn main() -> eyre::Result<()> {
         let f = [bench_blas];
 
         {
-            config.plot_name = PlotName(format!("small k{k}"));
             config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
                 (n * n * k) as f64 / time.to_secs()
             })
@@ -81,38 +80,15 @@ fn main() -> eyre::Result<()> {
                 move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, n, k))
             });
             bench.register_many(
-                list![f[0].with_name(&format!("small.k{k}.openblas")),],
-                args_small,
-            );
-            std::fs::write(
-                format!(
-                    "{}/openblas {}.json",
-                    concat!(env!("CARGO_MANIFEST_DIR")),
-                    config.plot_name.0
-                ),
-                serde_json::to_string(&bench.run()?)?,
-            )?;
-        }
-        {
-            config.plot_name = PlotName(format!("big k{k}"));
-            config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
-                (n * n * k) as f64 / time.to_secs()
-            })
-            .with_name("flops");
-            let bench = Bench::new(&config);
-
-            let f = f.map(move |f| {
-                move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, n, k))
-            });
-            bench.register_many(
-                list![f[0].with_name(&format!("big.k{k}.openblas"))],
+                &format!("m=n k={k}"),
+                list![f[0].with_name("openblas")],
                 args_big,
             );
             std::fs::write(
                 format!(
                     "{}/openblas {}.json",
                     concat!(env!("CARGO_MANIFEST_DIR")),
-                    config.plot_name.0
+                    bench.groups.borrow().keys().next().unwrap()
                 ),
                 serde_json::to_string(&bench.run()?)?,
             )?;
@@ -120,7 +96,6 @@ fn main() -> eyre::Result<()> {
 
         for PlotArg(m) in args_small {
             {
-                config.plot_name = PlotName(format!("tall k{k} n{m}"));
                 config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
                     (n * m * k) as f64 / time.to_secs()
                 })
@@ -130,21 +105,21 @@ fn main() -> eyre::Result<()> {
                     move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, m, k))
                 });
                 bench.register_many(
-                    list![f[0].with_name(&format!("tall.k{k}.n{m}.openblas")),],
+                    &format!("tall k={k} n={m}"),
+                    list![f[0].with_name("openblas")],
                     args_big,
                 );
                 std::fs::write(
                     format!(
                         "{}/openblas {}.json",
                         concat!(env!("CARGO_MANIFEST_DIR")),
-                        config.plot_name.0
+                        bench.groups.borrow().keys().next().unwrap()
                     ),
                     serde_json::to_string(&bench.run()?)?,
                 )?;
             }
 
             {
-                config.plot_name = PlotName(format!("wide k{k} m{m}"));
                 config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
                     (n * m * k) as f64 / time.to_secs()
                 })
@@ -154,14 +129,15 @@ fn main() -> eyre::Result<()> {
                     move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (m, n, k))
                 });
                 bench.register_many(
-                    list![f[0].with_name(&format!("wide.k{k}.m{m}.openblas")),],
+                    &format!("wide k={k} m={m}"),
+                    list![f[0].with_name("openblas")],
                     args_big,
                 );
                 std::fs::write(
                     format!(
                         "{}/openblas {}.json",
                         concat!(env!("CARGO_MANIFEST_DIR")),
-                        config.plot_name.0
+                        bench.groups.borrow().keys().next().unwrap()
                     ),
                     serde_json::to_string(&bench.run()?)?,
                 )?;

@@ -11,7 +11,7 @@ use std::fs;
 
 fn bench_gemm(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
     let rng = &mut StdRng::seed_from_u64(0);
-    let mut cs = m.next_multiple_of(8);
+    let mut cs = Ord::min(m.next_power_of_two(), m.next_multiple_of(8));
     if m > 48 {
         cs = Ord::max(4096, cs);
     }
@@ -130,7 +130,7 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     };
     let nr = if m <= 24 { 8 } else { 4 };
 
-    let mut cs = m.next_multiple_of(8);
+    let mut cs = Ord::min(m.next_power_of_two(), m.next_multiple_of(8));
     if m > 48 {
         cs = Ord::max(4096, cs);
     }
@@ -195,7 +195,7 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
             packed_lhs_rs[i] = 0;
         }
     }
-    for i in 0..q - 1 {
+    for i in 0..q - 2 {
         if row_chunk[i] >= m {
             packed_rhs_cs[i + 1] = 0;
         }
@@ -281,14 +281,17 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
 }
 
 fn main() -> eyre::Result<()> {
-    let mut config = BenchConfig::from_args()?;
+    let config = &mut Config::from_args()?;
     let plot_dir = &config.plot_dir.0.take();
-    let cache = try_cache_info_linux().unwrap();
 
-    let k = 64;
-    // dbg!(cache[0].cache_bytes / (k * size_of::<f64>()));
-    // dbg!(cache[1].cache_bytes / (k * size_of::<f64>()));
-    // dbg!(cache[2].cache_bytes / (k * size_of::<f64>()));
+    if false {
+        let cache = try_cache_info_linux().unwrap();
+
+        let k = 64;
+        dbg!(cache[0].cache_bytes / (k * size_of::<f64>()));
+        dbg!(cache[1].cache_bytes / (k * size_of::<f64>()));
+        dbg!(cache[2].cache_bytes / (k * size_of::<f64>()));
+    }
 
     for k in [64, 128, 256, 512] {
         let mut args_small: [_; 16] = core::array::from_fn(|i| {
@@ -323,7 +326,6 @@ fn main() -> eyre::Result<()> {
         ];
 
         {
-            config.plot_name = PlotName(format!("small k{k}"));
             config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
                 (n * n * k) as f64 / time.to_secs()
             })
@@ -334,68 +336,39 @@ fn main() -> eyre::Result<()> {
                 move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, n, k))
             });
             bench.register_many(
+                &format!("m=n k={k}"),
                 list![
-                    f[0].with_name(&format!("small.k{k}.asm")),
-                    f[1].with_name(&format!("small.k{k}.asm.packB")),
-                    f[2].with_name(&format!("small.k{k}.asm.packA")),
-                    f[3].with_name(&format!("small.k{k}.asm.packA.packB")),
-                    f[4].with_name(&format!("small.k{k}.gemm"))
-                ],
-                args_small,
-            );
-            let results = bench.run()?.combine(
-                &serde_json::from_str(
-                    &std::fs::read_to_string(format!(
-                        "{}/openblas {}.json",
-                        concat!(env!("CARGO_MANIFEST_DIR")),
-                        config.plot_name.0
-                    ))
-                    .unwrap_or_default(),
-                )
-                .unwrap_or(diol::result::BenchResult { groups: vec![] }),
-            );
-            if let Some(plot_dir) = plot_dir {
-                results.plot(&config.plot_name.0, config.plot_axis, plot_dir)?;
-            }
-        }
-        {
-            config.plot_name = PlotName(format!("big k{k}"));
-            config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
-                (n * n * k) as f64 / time.to_secs()
-            })
-            .with_name("flops");
-            let bench = Bench::new(&config);
-
-            let f = f.map(move |f| {
-                move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, n, k))
-            });
-            bench.register_many(
-                list![
-                    f[2].with_name(&format!("big.k{k}.asm.packA")),
-                    f[3].with_name(&format!("big.k{k}.asm.packA.packB")),
-                    f[4].with_name(&format!("big.k{k}.gemm"))
+                    f[0].with_name(&format!("asm")),
+                    f[1].with_name(&format!("asm pack B")),
+                    f[2].with_name(&format!("asm pack A")),
+                    f[3].with_name(&format!("asm pack A pack B")),
+                    f[4].with_name(&format!("gemm"))
                 ],
                 args_big,
             );
-            let results = bench.run()?.combine(
-                &serde_json::from_str(
-                    &std::fs::read_to_string(format!(
-                        "{}/openblas {}.json",
-                        concat!(env!("CARGO_MANIFEST_DIR")),
-                        config.plot_name.0
-                    ))
-                    .unwrap_or_default(),
-                )
-                .unwrap_or(diol::result::BenchResult { groups: vec![] }),
-            );
+            let results = bench
+                .run()?
+                .combine(&serde_json::from_str(&std::fs::read_to_string(&format!(
+                    "{}/openblas {}.json",
+                    concat!(env!("CARGO_MANIFEST_DIR")),
+                    bench.groups.borrow().keys().next().unwrap()
+                ))?)?);
+            std::fs::write(
+                format!(
+                    "{}/all {}.json",
+                    concat!(env!("CARGO_MANIFEST_DIR")),
+                    bench.groups.borrow().keys().next().unwrap()
+                ),
+                serde_json::to_string(&results)?,
+            )?;
+
             if let Some(plot_dir) = plot_dir {
-                results.plot(&config.plot_name.0, config.plot_axis, plot_dir)?;
+                results.plot(config, plot_dir)?;
             }
         }
 
         for PlotArg(m) in args_small {
             {
-                config.plot_name = PlotName(format!("tall k{k} n{m}"));
                 config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
                     (n * m * k) as f64 / time.to_secs()
                 })
@@ -405,33 +378,38 @@ fn main() -> eyre::Result<()> {
                     move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, m, k))
                 });
                 bench.register_many(
+                    &format!("tall k={k} n={m}"),
                     list![
-                        f[0].with_name(&format!("tall.k{k}.n{m}.asm")),
-                        f[1].with_name(&format!("tall.k{k}.n{m}.asm.packB")),
-                        f[2].with_name(&format!("tall.k{k}.n{m}.asm.packA")),
-                        f[3].with_name(&format!("tall.k{k}.n{m}.asm.packA.packB")),
-                        f[4].with_name(&format!("tall.k{k}.n{m}.gemm")),
+                        f[0].with_name(&format!("asm")),
+                        f[1].with_name(&format!("asm pack B")),
+                        f[2].with_name(&format!("asm packA")),
+                        f[3].with_name(&format!("asm packA pack B")),
+                        f[4].with_name(&format!("gemm")),
                     ],
                     args_big,
                 );
-                let results = bench.run()?.combine(
-                    &serde_json::from_str(
-                        &std::fs::read_to_string(format!(
+                let results =
+                    bench
+                        .run()?
+                        .combine(&serde_json::from_str(&std::fs::read_to_string(&format!(
                             "{}/openblas {}.json",
                             concat!(env!("CARGO_MANIFEST_DIR")),
-                            config.plot_name.0
-                        ))
-                        .unwrap_or_default(),
-                    )
-                    .unwrap_or(diol::result::BenchResult { groups: vec![] }),
-                );
+                            bench.groups.borrow().keys().next().unwrap()
+                        ))?)?);
+                std::fs::write(
+                    format!(
+                        "{}/all {}.json",
+                        concat!(env!("CARGO_MANIFEST_DIR")),
+                        bench.groups.borrow().keys().next().unwrap()
+                    ),
+                    serde_json::to_string(&results)?,
+                )?;
                 if let Some(plot_dir) = plot_dir {
-                    results.plot(&config.plot_name.0, config.plot_axis, plot_dir)?;
+                    results.plot(config, plot_dir)?;
                 }
             }
 
             {
-                config.plot_name = PlotName(format!("wide k{k} m{m}"));
                 config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
                     (n * m * k) as f64 / time.to_secs()
                 })
@@ -441,26 +419,32 @@ fn main() -> eyre::Result<()> {
                     move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (m, n, k))
                 });
                 bench.register_many(
+                    &format!("wide k={k} m={m}"),
                     list![
-                        f[2].with_name(&format!("wide.k{k}.m{m}.asm.packA")),
-                        f[3].with_name(&format!("wide.k{k}.m{m}.asm.packA.packB")),
-                        f[4].with_name(&format!("wide.k{k}.m{m}.gemm")),
+                        f[2].with_name(&format!("asm packA")),
+                        f[3].with_name(&format!("asm packA pack B")),
+                        f[4].with_name(&format!("gemm")),
                     ],
                     args_big,
                 );
-                let results = bench.run()?.combine(
-                    &serde_json::from_str(
-                        &std::fs::read_to_string(format!(
+                let results =
+                    bench
+                        .run()?
+                        .combine(&serde_json::from_str(&std::fs::read_to_string(&format!(
                             "{}/openblas {}.json",
                             concat!(env!("CARGO_MANIFEST_DIR")),
-                            config.plot_name.0
-                        ))
-                        .unwrap_or_default(),
-                    )
-                    .unwrap_or(diol::result::BenchResult { groups: vec![] }),
-                );
+                            bench.groups.borrow().keys().next().unwrap()
+                        ))?)?);
+                std::fs::write(
+                    format!(
+                        "{}/all {}.json",
+                        concat!(env!("CARGO_MANIFEST_DIR")),
+                        bench.groups.borrow().keys().next().unwrap()
+                    ),
+                    serde_json::to_string(&results)?,
+                )?;
                 if let Some(plot_dir) = plot_dir {
-                    results.plot(&config.plot_name.0, config.plot_axis, plot_dir)?;
+                    results.plot(config, plot_dir)?;
                 }
             }
         }
