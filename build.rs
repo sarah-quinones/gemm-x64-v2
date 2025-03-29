@@ -1157,7 +1157,7 @@ impl Target {
 
         let suffix = format!("[with m = {m * self.len()}, n = {n}]");
         let lhs = rax;
-        let packed_lhs = rbx;
+        let packed_lhs = r15;
         let rhs = rcx;
         let packed_rhs = rdx;
         let dst = rdi;
@@ -1811,7 +1811,7 @@ impl Target {
                                         vfma231!(zmm(tmp), zmm(src), zmm(alpha_re));
                                         vmov!(zmm(src), zmm(tmp));
                                     } else {
-                                        // vmul!(zmm(src), zmm(src), zmm(alpha_re));
+                                        vmul!(zmm(src), zmm(src), zmm(alpha_re));
                                     }
                                 };
 

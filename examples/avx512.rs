@@ -160,13 +160,13 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     let wide = n > 2 * m;
 
     let (mut row_chunk, mut col_chunk) = if tall {
-        ([m, m, 64 * mr / f, 32 * mr / f, mr], [n, n, 512, 192, nr])
+        ([m, 64 * mr / f, 32 * mr / f, mr], [n, 512, 192, nr])
     } else if wide {
-        ([m, m, 1024, 1024 / f, mr], [n, n, 4048 / f, 2048 / f, nr])
+        ([m, 1024, 1024 / f, mr], [n, 4048 / f, 2048 / f, nr])
     } else {
         (
-            [m, 16 * 1024 / f, 8 * 1024 / f, 32 * mr / f, mr],
-            [n, 4096 / f, 1024, 2 * nr, nr],
+            [6 * 1024 / f, 8 * 1024 / f, 32 * mr / f, mr],
+            [4096 / f, 1024, 2 * nr, nr],
         )
     };
 
@@ -187,19 +187,19 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     let mut packed_lhs_rs = row_chunk.map(|m| (m * k) as isize * sizeof);
     let mut packed_rhs_cs = col_chunk.map(|n| (n * k) as isize * sizeof);
 
-    packed_rhs_cs[0] = 0;
-    packed_lhs_rs[0] = 0;
+    _ = &mut packed_lhs_rs;
+    _ = &mut packed_rhs_cs;
 
-    for i in 0..q - 1 {
-        if col_chunk[i] >= n {
-            packed_lhs_rs[i] = 0;
-        }
-    }
-    for i in 0..q - 2 {
-        if row_chunk[i] >= m {
-            packed_rhs_cs[i + 1] = 0;
-        }
-    }
+    // for i in 0..q - 1 {
+    //     if col_chunk[i] >= n {
+    //         packed_lhs_rs[i] = 0;
+    //     }
+    // }
+    // for i in 0..q - 2 {
+    //     if row_chunk[i] >= m {
+    //         packed_rhs_cs[i + 1] = 0;
+    //     }
+    // }
     // packed_lhs_rs[2] = 0;
     // packed_lhs_rs[3] = 0;
     // packed_lhs_rs[4] = 0;
@@ -213,7 +213,7 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
         // row stride is    sizeof(T) * row_distance
         // column stride is sizeof(T) * row_dim * col_distance
 
-        kernel2(
+        kernel(
             if m <= 1 {
                 &F64_SIMD64
             } else if m <= 2 {
@@ -225,16 +225,6 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
             } else {
                 &F64_SIMD512x4[..24]
             },
-            if m <= 1 {
-                1
-            } else if m <= 2 {
-                2
-            } else if m <= 4 {
-                4
-            } else {
-                8
-            },
-            sizeof as usize,
             nr,
             lhs.as_ptr() as _,
             if PACK_LHS {
