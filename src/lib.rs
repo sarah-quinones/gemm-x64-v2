@@ -1,4 +1,4 @@
-#![cfg_attr(any(), no_std)]
+#![cfg_attr(all(not(test), any()), no_std)]
 #![allow(non_upper_case_globals)]
 
 use core::ptr::{null, null_mut};
@@ -139,42 +139,32 @@ pub unsafe fn millikernel_rowmajor(
             let mut lhs = lhs;
             let col = milli.micro.col;
 
-            {
-                (nrows, ncols) = call_microkernel(
-                    microkernel,
-                    lhs,
-                    packed_lhs,
-                    rhs,
-                    packed_rhs,
-                    nrows,
-                    ncols,
-                    &mut milli.micro,
-                    dst,
-                );
+            macro_rules! iter {
+                ($($lhs: ident)?) => {{
+                    (nrows, ncols) = call_microkernel(
+                        microkernel,
+                        lhs,
+                        packed_lhs,
+                        rhs,
+                        packed_rhs,
+                        nrows,
+                        ncols,
+                        &mut milli.micro,
+                        dst,
+                    );
 
-                rhs = rhs.wrapping_byte_offset(milli.rhs_cs);
-                packed_rhs = packed_rhs.wrapping_byte_offset(milli.packed_rhs_cs);
+                    rhs = rhs.wrapping_byte_offset(milli.rhs_cs);
+                    packed_rhs = packed_rhs.wrapping_byte_offset(milli.packed_rhs_cs);
 
-                if lhs != packed_lhs {
-                    milli.micro.lhs_rs = 0;
-                    lhs = packed_lhs;
-                }
+                    $(if $lhs != packed_lhs {
+                        milli.micro.lhs_rs = 0;
+                        lhs = packed_lhs;
+                    })?
+                }};
             }
+            iter!(lhs);
             while ncols > 0 {
-                (nrows, ncols) = call_microkernel(
-                    microkernel,
-                    lhs,
-                    packed_lhs,
-                    rhs,
-                    packed_rhs,
-                    nrows,
-                    ncols,
-                    &mut milli.micro,
-                    dst,
-                );
-
-                rhs = rhs.wrapping_byte_offset(milli.rhs_cs);
-                packed_rhs = packed_rhs.wrapping_byte_offset(milli.packed_rhs_cs);
+                iter!();
             }
             milli.micro.col = col;
         }
@@ -228,42 +218,32 @@ pub unsafe fn millikernel_colmajor(
             let mut rhs = rhs;
             let row = milli.micro.row;
 
-            {
-                (nrows, ncols) = call_microkernel(
-                    microkernel,
-                    lhs,
-                    packed_lhs,
-                    rhs,
-                    packed_rhs,
-                    nrows,
-                    ncols,
-                    &mut milli.micro,
-                    dst,
-                );
+            macro_rules! iter {
+                ($($rhs: ident)?) => {{
+                    (nrows, ncols) = call_microkernel(
+                        microkernel,
+                        lhs,
+                        packed_lhs,
+                        rhs,
+                        packed_rhs,
+                        nrows,
+                        ncols,
+                        &mut milli.micro,
+                        dst,
+                    );
 
-                lhs = lhs.wrapping_byte_offset(milli.lhs_rs);
-                packed_lhs = packed_lhs.wrapping_byte_offset(milli.packed_lhs_rs);
+                    lhs = lhs.wrapping_byte_offset(milli.lhs_rs);
+                    packed_lhs = packed_lhs.wrapping_byte_offset(milli.packed_lhs_rs);
 
-                if rhs != packed_rhs {
-                    milli.micro.rhs_cs = 0;
-                    rhs = packed_rhs;
-                }
+                    $(if $rhs != packed_rhs {
+                        milli.micro.rhs_cs = 0;
+                        rhs = packed_rhs;
+                    })?
+                }};
             }
+            iter!(rhs);
             while nrows > 0 {
-                (nrows, ncols) = call_microkernel(
-                    microkernel,
-                    lhs,
-                    packed_lhs,
-                    rhs,
-                    packed_rhs,
-                    nrows,
-                    ncols,
-                    &mut milli.micro,
-                    dst,
-                );
-
-                lhs = lhs.wrapping_byte_offset(milli.lhs_rs);
-                packed_lhs = packed_lhs.wrapping_byte_offset(milli.packed_lhs_rs);
+                iter!();
             }
             milli.micro.row = row;
         }
@@ -323,6 +303,8 @@ pub unsafe fn kernel<'a>(
         usize,
         usize,
         usize,
+        usize,
+        usize,
         bool,
         bool,
     ); 16] = const {
@@ -337,13 +319,15 @@ pub unsafe fn kernel<'a>(
             0,
             0,
             0,
+            0,
+            0,
             false,
             false,
         ); 16]
     };
 
     stack[0] = (
-        lhs, packed_lhs, rhs, packed_rhs, row, col, nrows, ncols, 0, 0, false, false,
+        lhs, packed_lhs, rhs, packed_rhs, row, col, nrows, ncols, 0, 0, 0, 0, false, false,
     );
 
     let mut depth = 0;
@@ -389,6 +373,8 @@ pub unsafe fn kernel<'a>(
             ncols,
             i,
             j,
+            ii,
+            jj,
             is_packed_lhs,
             is_packed_rhs,
         ) = stack[depth];
@@ -432,7 +418,7 @@ pub unsafe fn kernel<'a>(
             while depth > 0 {
                 depth -= 1;
 
-                let (_, _, _, _, _, _, nrows, ncols, i, j, _, _) = &mut stack[depth];
+                let (_, _, _, _, _, _, nrows, ncols, i, j, ii, jj, _, _) = &mut stack[depth];
 
                 let col_chunk = col_chunk[depth];
                 let row_chunk = row_chunk[depth];
@@ -442,9 +428,12 @@ pub unsafe fn kernel<'a>(
 
                 if milli.micro.flags >> 63 == 0 {
                     *i += i_chunk;
+                    *ii += 1;
                     if *i == *nrows {
                         *i = 0;
+                        *ii = 0;
                         *j += j_chunk;
+                        *jj += 1;
 
                         if *j == *ncols {
                             if depth == 0 {
@@ -452,17 +441,22 @@ pub unsafe fn kernel<'a>(
                             }
 
                             *j = 0;
+                            *jj = 0;
                             continue;
                         }
                     }
                 } else {
                     *j += j_chunk;
+                    *jj += 1;
                     if *j == *ncols {
                         *j = 0;
+                        *jj = 0;
                         *i += i_chunk;
+                        *ii += 1;
 
                         if *i == *nrows {
                             *i = 0;
+                            *ii = 0;
                             if depth == 0 {
                                 return;
                             }
@@ -485,14 +479,16 @@ pub unsafe fn kernel<'a>(
 
             depth += 1;
             stack[depth] = (
-                lhs.wrapping_byte_offset(lhs_rs * (i / row_chunk) as isize),
-                packed_lhs.wrapping_byte_offset(plhs_rs * (i / row_chunk) as isize),
-                rhs.wrapping_byte_offset(rhs_cs * (j / col_chunk) as isize),
-                packed_rhs.wrapping_byte_offset(prhs_cs * (j / col_chunk) as isize),
+                lhs.wrapping_byte_offset(lhs_rs * ii as isize),
+                packed_lhs.wrapping_byte_offset(plhs_rs * ii as isize),
+                rhs.wrapping_byte_offset(rhs_cs * jj as isize),
+                packed_rhs.wrapping_byte_offset(prhs_cs * jj as isize),
                 row + i,
                 col + j,
                 i_chunk,
                 j_chunk,
+                0,
+                0,
                 0,
                 0,
                 is_packed_lhs || (j > 0 && packed_lhs_rs[depth] != 0),
@@ -713,7 +709,7 @@ mod tests_f64 {
                 let mut i = 0;
                 for (&target, &dst) in core::iter::zip(&*target, &*dst) {
                     if !((target - dst).abs() < 1e-6) {
-                        std::dbg!(i / cs, i % cs, target, dst);
+                        dbg!(i / cs, i % cs, target, dst);
                         panic!();
                     }
                     i += 1;
@@ -838,7 +834,7 @@ mod tests_c64 {
                                         let mut i = 0;
                                         for (&target, &dst) in core::iter::zip(&*target, &*dst) {
                                             if !((target - dst).norm_sqr().sqrt() < 1e-6) {
-                                                std::dbg!(i / cs, i % cs, target, dst);
+                                                dbg!(i / cs, i % cs, target, dst);
                                                 panic!();
                                             }
                                             i += 1;
@@ -1064,7 +1060,7 @@ mod tests_f32 {
                 let mut i = 0;
                 for (&target, &dst) in core::iter::zip(&*target, &*dst) {
                     if !((target - dst).abs() < 1e-6) {
-                        std::dbg!(i / cs, i % cs, target, dst);
+                        dbg!(i / cs, i % cs, target, dst);
                         panic!();
                     }
                     i += 1;
@@ -1189,7 +1185,7 @@ mod tests_c32 {
                                         let mut i = 0;
                                         for (&target, &dst) in core::iter::zip(&*target, &*dst) {
                                             if !((target - dst).norm_sqr().sqrt() < 1e-4) {
-                                                std::dbg!(i / cs, i % cs, target, dst);
+                                                dbg!(i / cs, i % cs, target, dst);
                                                 panic!();
                                             }
                                             i += 1;
