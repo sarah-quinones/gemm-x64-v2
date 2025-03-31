@@ -1160,7 +1160,7 @@ impl Target {
         let packed_lhs = r15;
         let rhs = rcx;
         let packed_rhs = rdx;
-        let dst = rdi;
+        let position = rdi;
         let info = rsi;
         let nrows = r8;
         let ncols = r9;
@@ -1171,20 +1171,18 @@ impl Target {
         let info_lhs_cs = 3 * WORD;
         let info_rhs_rs = 4 * WORD;
         let info_rhs_cs = 5 * WORD;
-        let info_row = 6 * WORD;
-        let info_col = 7 * WORD;
-        let info_alpha = 8 * WORD;
+        let info_alpha = 6 * WORD;
 
-        let dst_ptr = 0 * WORD;
-        let dst_rs = 1 * WORD;
-        let dst_cs = 2 * WORD;
+        let info_ptr = 7 * WORD;
+        let info_rs = 8 * WORD;
+        let info_cs = 9 * WORD;
 
         ctx[rsp].set(true);
         ctx[lhs].set(true);
         ctx[packed_lhs].set(true);
         ctx[rhs].set(true);
         ctx[packed_rhs].set(true);
-        ctx[dst].set(true);
+        ctx[position].set(true);
         ctx[nrows].set(true);
         ctx[ncols].set(true);
         ctx[info].set(true);
@@ -1234,17 +1232,18 @@ impl Target {
                 {
                     reg!(tmp);
 
-                    test!(lhs_rs, lhs_rs);
-
+                    test!(lhs, lhs);
                     mov!(tmp, m * simd.sizeof());
                     cmovz!(lhs_cs, tmp);
                     mov!(tmp, ty.sizeof());
                     cmovz!(lhs_rs, tmp);
+                    cmovz!(lhs, packed_lhs);
 
-                    test!(rhs_cs, rhs_cs);
+                    test!(rhs, rhs);
                     cmovz!(rhs_cs, tmp);
                     mov!(tmp, n * ty.sizeof());
                     cmovz!(rhs_rs, tmp);
+                    cmovz!(rhs, packed_rhs);
                 }
 
                 for i in 0..m * n * unroll {
@@ -1717,15 +1716,15 @@ impl Target {
                 reg!(ptr);
                 reg!(rs);
                 reg!(cs);
-                mov!(ptr, [dst + dst_ptr]);
-                mov!(rs, [dst + dst_rs]);
-                mov!(cs, [dst + dst_cs]);
+                mov!(ptr, [info + info_ptr]);
+                mov!(rs, [info + info_rs]);
+                mov!(cs, [info + info_cs]);
 
                 {
                     reg!(row);
                     reg!(col);
-                    mov!(row, [info + info_row]);
-                    mov!(col, [info + info_col]);
+                    mov!(row, [position]);
+                    mov!(col, [position + WORD]);
 
                     imul!(col, cs);
                     add!(ptr, col);
@@ -1847,34 +1846,34 @@ impl Target {
                 label!(colmajor);
                 {
                     if mask {
-                        add!([info + info_row], nrows);
-                        add!([info + info_col], n);
+                        add!([position], nrows);
+                        add!([position + WORD], n);
 
                         mov!(nrows, 0);
                         sub!(ncols, n);
                     } else {
-                        add!([info + info_row], m * self.len());
+                        add!([position], m * self.len());
                         sub!(nrows, m * self.len());
                         jnz!(end);
 
                         sub!(ncols, n);
-                        add!([info + info_col], n);
+                        add!([position + WORD], n);
                     }
                 }
                 jmp!(end);
 
                 label!(rowmajor);
                 {
-                    add!([info + info_col], n);
+                    add!([position + WORD], n);
                     sub!(ncols, n);
 
                     jnz!(end);
 
                     if mask {
-                        add!([info + info_row], nrows);
+                        add!([position], nrows);
                         mov!(nrows, 0);
                     } else {
-                        add!([info + info_row], m * self.len());
+                        add!([position], m * self.len());
                         sub!(nrows, m * self.len());
                     }
                 }

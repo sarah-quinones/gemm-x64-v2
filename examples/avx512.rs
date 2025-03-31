@@ -48,7 +48,7 @@ fn bench_gemm(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
             false,
             false,
             false,
-            gemm::Parallelism::None,
+            gemm::Parallelism::Rayon(0),
         );
     });
 }
@@ -156,19 +156,27 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
 
     let f = Ord::min(8, k.div_ceil(64));
 
-    let tall = m > 2 * n;
-    let wide = n > 2 * m;
+    let tall = m as f64 >= n as f64 * 1.25;
 
-    let (mut row_chunk, mut col_chunk) = if tall {
-        ([m, 64 * mr / f, 32 * mr / f, mr], [n, 512, 192, nr])
-    } else if wide {
-        ([m, 1024, 1024 / f, mr], [n, 4048 / f, 2048 / f, nr])
+    let l1 = 64 / f;
+    let l2 = 2048 / f;
+    let l3 = 32768 / f;
+    // dbg!(l2, l3);
+
+    let (row_chunk, col_chunk, rowmajor) = if tall {
+        ([l3, l3, l3 / 2, l1, mr], [l3, l3, l3 / 2, l2, nr], true)
     } else {
         (
-            [6 * 1024 / f, 8 * 1024 / f, 32 * mr / f, mr],
-            [4096 / f, 1024, 2 * nr, nr],
+            [m, m, m, m, mr],
+            [n, n, n, l3 / 2, nr],
+            false,
+            // [2 * l3, l3, l3 / 2, l2, mr],
+            // [2 * l3, l3, l3 / 2, l1, nr],
+            // false,
         )
     };
+    let mut row_chunk = row_chunk.map(|r| r.next_multiple_of(mr));
+    let mut col_chunk = col_chunk.map(|c| c.next_multiple_of(nr));
 
     let q = row_chunk.len();
 
@@ -190,16 +198,23 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     _ = &mut packed_lhs_rs;
     _ = &mut packed_rhs_cs;
 
-    // for i in 0..q - 1 {
+    // for i in 0..q - rowmajor as usize {
     //     if col_chunk[i] >= n {
-    //         packed_lhs_rs[i] = 0;
+    //         packed_lhs_rs[i + rowmajor as usize] = 0;
     //     }
     // }
-    // for i in 0..q - 2 {
+    // for i in 0..q - (!rowmajor) as usize {
     //     if row_chunk[i] >= m {
-    //         packed_rhs_cs[i + 1] = 0;
+    //         packed_rhs_cs[i + (!rowmajor) as usize] = 0;
     //     }
     // }
+    // if rowmajor {
+    //     packed_lhs_rs[0] = 0;
+    // } else {
+    //     packed_rhs_cs[0] = 0;
+    // }
+    // dbg!(row_chunk, col_chunk);
+
     // packed_lhs_rs[2] = 0;
     // packed_lhs_rs[3] = 0;
     // packed_lhs_rs[4] = 0;
@@ -213,7 +228,8 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
         // row stride is    sizeof(T) * row_distance
         // column stride is sizeof(T) * row_dim * col_distance
 
-        kernel(
+        kernel_rayon(
+            64,
             if m <= 1 {
                 &F64_SIMD64
             } else if m <= 2 {
@@ -225,6 +241,7 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
             } else {
                 &F64_SIMD512x4[..24]
             },
+            mr,
             nr,
             lhs.as_ptr() as _,
             if PACK_LHS {
@@ -248,34 +265,69 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
             &if PACK_RHS { packed_rhs_cs } else { rhs_cs },
             0,
             0,
-            &Dst {
+            Position { row: 0, col: 0 },
+            &MicrokernelInfo {
+                flags: ((rowmajor as usize) << 63),
+                depth: k,
+                lhs_rs: sizeof,
+                lhs_cs: cs as isize * sizeof,
+                rhs_rs: sizeof,
+                rhs_cs: k as isize * sizeof,
+                alpha: &raw const *&1.0 as _,
                 ptr: dst.as_mut_ptr() as _,
                 rs: sizeof,
                 cs: cs as isize * sizeof,
                 row_idx: null_mut(),
                 col_idx: null_mut(),
             },
-            &mut MicrokernelInfo {
-                flags: (0 << 63),
-                depth: k,
-                lhs_rs: sizeof,
-                lhs_cs: cs as isize * sizeof,
-                rhs_rs: sizeof,
-                rhs_cs: k as isize * sizeof,
-                row: 0,
-                col: 0,
-                alpha: &raw const *&1.0 as _,
-            },
         )
     });
+    if false {
+        let target = &mut *avec![0.0f64; m * cs];
+
+        unsafe {
+            gemm(
+                m,
+                n,
+                k,
+                target.as_mut_ptr(),
+                cs as isize,
+                1,
+                false,
+                lhs.as_ptr(),
+                cs as isize,
+                1,
+                rhs.as_ptr(),
+                k as isize,
+                1,
+                0.0,
+                1.0,
+                false,
+                false,
+                false,
+                gemm::Parallelism::None,
+            )
+        };
+        let mut i = 0;
+        for (target, dst) in std::iter::zip(&*target, &*dst) {
+            if !((target - dst).abs() < 1e-6) {
+                dbg!(i / cs, i % cs, target, dst);
+                panic!();
+            }
+            i += 1;
+        }
+    }
 }
 
 fn main() -> eyre::Result<()> {
     let config = &mut Config::from_args()?;
     let plot_dir = &config.plot_dir.0.take();
 
-    if false {
+    if true {
         let cache = try_cache_info_linux().unwrap();
+        dbg!(cache[0].cache_bytes);
+        dbg!(cache[1].cache_bytes);
+        dbg!(cache[2].cache_bytes);
 
         let k = 64;
         dbg!(cache[0].cache_bytes / (k * size_of::<f64>()));
