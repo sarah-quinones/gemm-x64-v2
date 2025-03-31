@@ -378,7 +378,7 @@ fn main() -> eyre::Result<()> {
                 move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, n, k))
             });
             bench.register_many(
-                &format!("m=n k={k}"),
+                &format!("k={k} m=n"),
                 list![
                     f[0].with_name(&format!("asm")),
                     f[1].with_name(&format!("asm pack B")),
@@ -420,7 +420,7 @@ fn main() -> eyre::Result<()> {
                     move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, m, k))
                 });
                 bench.register_many(
-                    &format!("tall k={k} n={m}"),
+                    &format!("k={k} n={m}"),
                     list![
                         f[0].with_name(&format!("asm")),
                         f[1].with_name(&format!("asm pack B")),
@@ -461,7 +461,7 @@ fn main() -> eyre::Result<()> {
                     move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (m, n, k))
                 });
                 bench.register_many(
-                    &format!("wide k={k} m={m}"),
+                    &format!("k={k} m={m}"),
                     list![
                         f[2].with_name(&format!("asm packA")),
                         f[3].with_name(&format!("asm packA pack B")),

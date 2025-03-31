@@ -80,7 +80,7 @@ fn main() -> eyre::Result<()> {
                 move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, n, k))
             });
             bench.register_many(
-                &format!("m=n k={k}"),
+                &format!("k={k} m=n"),
                 list![f[0].with_name("openblas")],
                 args_big,
             );
@@ -105,7 +105,7 @@ fn main() -> eyre::Result<()> {
                     move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (n, m, k))
                 });
                 bench.register_many(
-                    &format!("tall k={k} n={m}"),
+                    &format!("k={k} n={m}"),
                     list![f[0].with_name("openblas")],
                     args_big,
                 );
@@ -129,7 +129,7 @@ fn main() -> eyre::Result<()> {
                     move |bencher: Bencher<'_>, PlotArg(n): PlotArg| f(bencher, (m, n, k))
                 });
                 bench.register_many(
-                    &format!("wide k={k} m={m}"),
+                    &format!("k={k} m={m}"),
                     list![f[0].with_name("openblas")],
                     args_big,
                 );
