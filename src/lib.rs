@@ -2,6 +2,9 @@
 #![allow(non_upper_case_globals)]
 #![allow(dead_code, unused_variables)]
 
+const M: usize = 4;
+const N: usize = 32;
+
 use core::{
     ptr::{null, null_mut},
     sync::atomic::{AtomicU8, AtomicUsize, Ordering},
@@ -275,6 +278,9 @@ pub unsafe fn millikernel_par_colmajor(
     mr: usize,
     nr: usize,
 
+    mf: usize,
+    nf: usize,
+
     microkernel: unsafe extern "C" fn(),
 
     lhs: *const (),
@@ -290,105 +296,44 @@ pub unsafe fn millikernel_par_colmajor(
 
     pos: Position,
 ) {
-    let max_j = ncols.div_ceil(nr);
-    let max_i = nrows.div_ceil(mr);
+    let n_threads0 = nrows.div_ceil(mf * mr);
+    let n_threads1 = ncols.div_ceil(nf * nr);
 
-    let mut hyper = hyper;
-    if n_threads % hyper != 0 {
-        hyper = 1;
-    }
+    let thd_id0 = thd_id % (n_threads0);
+    let thd_id1 = thd_id / (n_threads0);
 
-    let n_threads0 = n_threads / hyper;
-    let n_threads1 = hyper;
+    if true {
+       let i = mf * thd_id0;
+       let j = nf * thd_id1;
 
-    let thd_id0 = thd_id % (n_threads / hyper);
-    let thd_id1 = thd_id / (n_threads / hyper);
+     for j in j..j + nf {     
+          for i in i..i + mf {
+ 
+    let row = Ord::min(nrows, i * mr);
+    let col = Ord::min(ncols, j * nr);
+   
+   
 
-    let l2 = 96 / mr * mr;
-    let l1 = 4;
+       let row_chunk = Ord::min(nrows - row, mr);
+       let col_chunk = Ord::min(ncols - col, nr);
 
-    {
-        // let max_jobs = max_i * max_j;
-        let (div, rem) = (max_i / n_threads0, max_i % n_threads0);
-
-        let i_start = thd_id0 * div + Ord::min(thd_id0, rem);
-        let mut i_end = i_start + div;
-
-        if thd_id0 < rem {
-            i_end += 1;
-        }
-
-        let row = i_start * mr;
-        let pos = Position {
-            row: pos.row + row,
-            col: pos.col,
-        };
-        let nrows = Ord::min(nrows - row, mr * (i_end - i_start));
-
-        'main: for i in 0..nrows.div_ceil(mr).div_ceil(l2 / mr) {
-            let row = i * l2;
-
-            let pos = Position {
-                row: pos.row + row,
-                col: pos.col,
-            };
-
-            let nrows = Ord::min(nrows - row, l2);
-            let i_start = i_start + l2 / mr * i;
-
-            let packed_lhs =
-                packed_lhs.wrapping_byte_offset(milli.packed_lhs_rs * i_start as isize);
-
-            let mut lhs = lhs;
-            if !lhs.is_null() {
-                lhs = lhs.wrapping_byte_offset(milli.lhs_rs * i_start as isize);
-            }
-            let lhs = lhs;
-
-            let pack_lhs_job = &pack_lhs_job[i_start..];
-
-            let mut rhs = rhs;
-            let mut packed_rhs = packed_rhs;
-
-            let max_i = nrows.div_ceil(mr);
-            let c = max_i.div_ceil(8);
-
-            let (div, rem) = (max_j / n_threads1, max_j % n_threads1);
-
-            let mut j = thd_id1 * div + Ord::min(thd_id1, rem);
-            let mut j_end = j + div;
-            if thd_id1 < rem {
-                j_end += 1;
-            }
-
-            let mut col = j * nr;
-
-            if !rhs.is_null() {
-                rhs = rhs.wrapping_byte_offset(j as isize * milli.rhs_cs);
-            }
-            packed_rhs = packed_rhs.wrapping_byte_offset(j as isize * milli.packed_rhs_cs);
-
-            loop {
-                let col_chunk = Ord::min(ncols - col, nr);
-
-                unsafe {
-                    let mut rhs = rhs;
-                    let mut row = 0;
-                    let mut i = 0;
-
-                    while row < nrows {
-                        let row_chunk = Ord::min(nrows - row, mr);
-                        {
-                            let mut rhs = rhs;
-                            let mut packed_rhs = packed_rhs;
-
-                            for j in j..Ord::min(j_end, j + l1) {
+       if row_chunk == 0 || col_chunk == 0 {
+           continue;
+       }
+       
+          
                                 let packed_lhs = packed_lhs
                                     .wrapping_byte_offset(milli.packed_lhs_rs * i as isize);
+                                let packed_rhs = packed_rhs
+                                    .wrapping_byte_offset(milli.packed_rhs_cs * j as isize);
+ 
                                 let mut lhs = lhs;
+                                let mut rhs = rhs;
 
-                                if !lhs.is_null() {
+                                 {
+                                     if !lhs.is_null() {
                                     lhs = lhs.wrapping_byte_offset(milli.lhs_rs * i as isize);
+                                     }
 
                                     if lhs != packed_lhs {
                                         let val = pack_lhs_job[i].load(Ordering::Acquire);
@@ -400,14 +345,20 @@ pub unsafe fn millikernel_par_colmajor(
                                 }
 
                                 {
-                                    if !rhs.is_null() && rhs != packed_rhs {
+                                    if !rhs.is_null() {
+                                    rhs = rhs.wrapping_byte_offset(milli.rhs_cs * j as isize);
+                                    }
+                                    if rhs != packed_rhs {
                                         let val = pack_rhs_job[j].load(Ordering::Acquire);
 
                                         if val == 2 {
                                             rhs = null();
                                         }
                                     }
+                                    
 
+                                    // dbg!(lhs);
+                                    
                                     call_microkernel(
                                         microkernel,
                                         lhs,
@@ -419,7 +370,7 @@ pub unsafe fn millikernel_par_colmajor(
                                         &milli.micro,
                                         &mut Position {
                                             row: row + pos.row,
-                                            col: j * nr + pos.col,
+                                            col: col + pos.col,
                                         },
                                     );
 
@@ -430,34 +381,14 @@ pub unsafe fn millikernel_par_colmajor(
                                         pack_rhs_job[j].store(2, Ordering::Release);
                                     }
                                 }
-                                if !rhs.is_null() {
-                                    rhs = rhs.wrapping_byte_offset(milli.rhs_cs);
-                                }
-                                packed_rhs = packed_rhs.wrapping_byte_offset(milli.packed_rhs_cs);
-                            }
-                        }
-                        i += 1;
-                        row += row_chunk;
-                        if rhs != packed_rhs {
-                            rhs = null();
-                        }
-                    }
-                }
+                                
+                            }}
+                        
+ 
+   }
+    
 
-                col += col_chunk;
-                j += Ord::min(l1, j_end - j);
-                if j == j_end {
-                    continue 'main;
-                }
-
-                if !rhs.is_null() {
-                    rhs = rhs.wrapping_byte_offset(l1 as isize * milli.rhs_cs);
-                }
-                packed_rhs = packed_rhs.wrapping_byte_offset(l1 as isize * milli.packed_rhs_cs);
-            }
         }
-    }
-}
 
 pub unsafe trait Millikernel {
     unsafe fn call(
@@ -532,7 +463,7 @@ unsafe impl Millikernel for Milli {
 }
 
 #[derive(Copy, Clone)]
-struct Cell<T>(T);
+pub struct Cell<T>(pub T);
 unsafe impl<T> Sync for Cell<T> {}
 unsafe impl<T> Send for Cell<T> {}
 
@@ -554,8 +485,8 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
         milli: &MillikernelInfo,
         pos: Position,
     ) {
-        let lhs = Cell(lhs);
-        let rhs = Cell(rhs);
+        let mut lhs = Cell(lhs);
+        let mut rhs = Cell(rhs);
         let packed_lhs = Cell(packed_lhs);
         let packed_rhs = Cell(packed_rhs);
         let milli = Cell(milli);
@@ -565,7 +496,122 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
         self.pack_rhs_job.fill_with(|| AtomicU8::new(0));
         self.finished = AtomicUsize::new(0);
 
-        syncthreads::for_each_raw(self.n_threads, |tid| unsafe {
+        let tall = nrows >= 2 * ncols;
+        let wide = ncols >= 2 * nrows;
+
+        let f = Ord::min(8, milli.0.micro.depth.div_ceil(64));
+        let mut mf = Ord::clamp(nrows.div_ceil(self.mr).div_ceil(2 * self.n_threads), 2, 4);
+        if tall {
+            mf = 16 / f;
+        }
+        if wide {
+           mf = 2; 
+        }
+        let par_rows = nrows.div_ceil(mf * self.mr);
+        let mut nf = Ord::clamp(ncols.div_ceil(self.nr).div_ceil(8 * self.n_threads) * par_rows, 1, 1024 / f);
+        
+        let n = nrows.div_ceil(mf * self.mr) * ncols.div_ceil(nf * self.nr);
+             // dbg!(mf, nf);
+
+        
+        
+
+        let mr = self.mr;
+        let nr = self.nr;
+
+        if !lhs.0.is_null() && lhs.0 != packed_lhs.0 {
+            let depth = {milli}.0.micro.depth;
+            let n_threads = 2;
+        
+            let div = nrows.div_ceil(mr) / n_threads;
+            let rem = nrows.div_ceil(mr) % n_threads;
+ 
+                if !tall {
+           syncthreads::for_each_raw(n_threads, |tid| {
+                let mut start = tid * div;
+                if tid <= rem {
+                    start += tid;
+                } else {
+                    start += rem;
+                }
+                let end = start + div + if tid < rem { 1 } else { 0 };
+
+for i in start..end {
+            let row = Ord::min(nrows, i * mr);
+            let nrows = Ord::min(nrows - row, mr);
+
+            let n = if mr >= 24 { 8 } else { Ord::min(mr, 4) };
+            if nrows == 0 {
+                return;
+            }
+
+            let cs = nrows.next_multiple_of(n);
+            let lhs = Cell({lhs}.0.wrapping_byte_offset({milli}.0.lhs_rs * i as isize));
+            let packed_lhs = Cell({packed_lhs}.0.wrapping_byte_offset({milli}.0.packed_lhs_rs * i as isize));
+
+                for j in 0..depth {
+                core::ptr::copy_nonoverlapping({lhs}.0.wrapping_byte_offset(j as isize * {milli}.0.micro.lhs_cs) as *const f64, {packed_lhs}.0.wrapping_byte_offset((j * cs * size_of::<f64>()) as isize) as *mut f64, nrows);
+                }
+}
+            });
+lhs.0 = null();
+}
+
+            
+        
+        }
+
+        if !rhs.0.is_null() && rhs.0 != packed_rhs.0 {
+            let depth = {milli}.0.micro.depth;
+        
+            let div = depth / self.n_threads;
+            let rem = depth % self.n_threads;
+ 
+            if !wide {
+           syncthreads::for_each_raw(self.n_threads, |j| {
+                let mut start = j * div;
+                if j <= rem {
+                    start += j;
+                } else {
+                    start += rem;
+                }
+                let end = start + div + if j < rem { 1 } else { 0 };
+
+for i in 0..ncols.div_ceil(nr) {
+            let col = Ord::min(ncols, i * nr);
+            let ncols = Ord::min(ncols - col, nr);
+
+            let rs = ncols;
+            let rhs = Cell({rhs}.0.wrapping_byte_offset({milli}.0.rhs_cs * i as isize));
+            let packed_rhs = Cell({packed_rhs}.0.wrapping_byte_offset({milli}.0.packed_rhs_cs * i as isize));
+
+                for j in start..end{
+                    for k in 0..ncols {
+                core::ptr::copy_nonoverlapping({rhs}.0.wrapping_byte_offset(k as isize * {milli}.0.micro.rhs_cs + j as isize * {milli}.0.micro.rhs_rs) as *const f64, {packed_rhs}.0.wrapping_byte_offset(( (k + j * rs) * size_of::<f64>()) as isize) as *mut f64, 1);
+                }
+                    }
+}
+            });
+rhs.0 = null();
+}
+
+            
+        
+        }
+
+
+
+        let gtid = AtomicUsize::new(0);
+
+
+        use rayon::prelude::*;
+        syncthreads::for_each_raw(self.n_threads, |_| unsafe {
+            loop {
+
+            let tid = gtid.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if tid >= n {
+                return;
+            }
             let milli = { milli }.0;
 
             (if milli.micro.flags >> 63 == 1 {
@@ -574,7 +620,7 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
                 millikernel_par_colmajor
             })(
                 tid,
-                self.n_threads,
+                n,
                 &self.microkernel_job,
                 &self.pack_lhs_job,
                 &self.pack_rhs_job,
@@ -582,6 +628,8 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
                 self.hyper,
                 self.mr,
                 self.nr,
+                mf,
+                nf,
                 microkernel,
                 { lhs }.0,
                 { packed_lhs }.0,
@@ -591,7 +639,8 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
                 ncols,
                 milli,
                 pos,
-            )
+            );
+            }
         });
     }
 }
@@ -862,13 +911,15 @@ pub unsafe fn kernel_rayon(
     let packed_rhs = Cell(packed_rhs);
     let info = Cell(info);
 
-    syncthreads::with_lock(n_threads, || {
+    // syncthreads::with_lock(n_threads, || 
+    ( 
+                           {
         unsafe {
             kernel_imp(
                 &mut MilliPar {
                     mr,
                     nr,
-                    hyper: 8,
+                    hyper: 1,
                     microkernel_job: (0..c * max_j).map(|_| AtomicU8::new(0)).collect(),
                     pack_lhs_job: (0..max_i).map(|_| AtomicU8::new(0)).collect(),
                     pack_rhs_job: (0..max_j).map(|_| AtomicU8::new(0)).collect(),
@@ -897,7 +948,8 @@ pub unsafe fn kernel_rayon(
                 { info }.0,
             )
         };
-    });
+    }
+    );
 }
 
 pub unsafe fn kernel(

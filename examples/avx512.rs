@@ -130,13 +130,14 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     };
     let nr = if m <= 24 { 8 } else { 4 };
 
-    let mut cs = Ord::min(m.next_power_of_two(), m.next_multiple_of(8));
-    if m > 48 {
+    let mut cs = Ord::min(m.next_power_of_two(), m.next_multiple_of(mr));
+    if  m > 48 {
         cs = Ord::max(4096, cs);
     }
 
-    let packed_lhs = &mut *avec![[4096]| 0.0; m.next_multiple_of(8) * k];
+    let packed_lhs = &mut *avec![[4096]| 0.0; m.next_multiple_of(mr) * k];
     let packed_rhs = &mut *avec![[4096]| 0.0; n.next_multiple_of(8) * k];
+   // dbg!(packed_lhs.as_ptr());
 
     let lhs = &mut *avec![[4096]| 0.0; cs * k];
     let rhs = &mut *avec![[4096]| 0.0; k * n];
@@ -145,15 +146,6 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     rng.fill(lhs);
     rng.fill(rhs);
 
-    if m <= 48 && PACK_RHS {
-        return bencher.skip();
-    }
-    let pack_lhs = n > nr && (n > 6 * nr || cs > 4096);
-
-    if pack_lhs != PACK_LHS {
-        return bencher.skip();
-    }
-
     let f = Ord::min(8, k.div_ceil(64));
 
     let tall = m as f64 >= n as f64 * 1.25;
@@ -161,14 +153,22 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     let l1 = 64 / f;
     let l2 = 2048 / f;
     let l3 = 32768 / f;
-    // dbg!(l2, l3);
 
-    let (row_chunk, col_chunk, rowmajor) = if tall {
+    if m <= 48 && PACK_RHS {
+        return bencher.skip();
+    }
+    let pack_lhs = n > l3 / 2 / rayon::current_num_threads() && (n > rayon::current_num_threads() * 6 * nr || cs > 4096);
+
+    if pack_lhs != PACK_LHS {
+        return bencher.skip();
+    }
+
+        let (row_chunk, col_chunk, rowmajor) = if false && tall {
         ([l3, l3, l3 / 2, l1, mr], [l3, l3, l3 / 2, l2, nr], true)
     } else {
         (
             [m, m, m, m, mr],
-            [n, n, n, l3 / 2, nr],
+            [n, n, n, l3, nr],
             false,
             // [2 * l3, l3, l3 / 2, l2, mr],
             // [2 * l3, l3, l3 / 2, l1, nr],
@@ -177,6 +177,7 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     };
     let mut row_chunk = row_chunk.map(|r| r.next_multiple_of(mr));
     let mut col_chunk = col_chunk.map(|c| c.next_multiple_of(nr));
+ 
 
     let q = row_chunk.len();
 
@@ -223,13 +224,20 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     // dbg!(packed_rhs_cs);
     // dbg!(packed_lhs_rs);
 
-    bencher.bench(|| unsafe {
+    {
+    let lhs = Cell(lhs.as_ptr());
+    let rhs = Cell(rhs.as_ptr());
+    let packed_lhs = Cell(packed_lhs.as_mut_ptr());
+    let packed_rhs = Cell(packed_rhs.as_mut_ptr());
+    let bencher = Cell(bencher);
+    syncthreads::with_lock(rayon::current_num_threads(), ||{
+        {bencher}.0.bench(|| unsafe {
         // A and B in this benchmark are column major
         // row stride is    sizeof(T) * row_distance
         // column stride is sizeof(T) * row_dim * col_distance
 
         kernel_rayon(
-            64,
+            rayon::current_num_threads(),
             if m <= 1 {
                 &F64_SIMD64
             } else if m <= 2 {
@@ -243,17 +251,17 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
             },
             mr,
             nr,
-            lhs.as_ptr() as _,
+            {lhs}.0 as _,
             if PACK_LHS {
-                packed_lhs.as_mut_ptr() as _
+                {packed_lhs}.0 as _
             } else {
-                lhs.as_ptr() as _
+                {lhs}.0 as _
             },
-            rhs.as_ptr() as _,
+                {rhs}.0 as _,
             if PACK_RHS {
-                packed_rhs.as_mut_ptr() as _
+                {packed_rhs}.0 as _
             } else {
-                rhs.as_ptr() as _
+                {rhs}.0 as _
             },
             m,
             n,
@@ -282,8 +290,10 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
             },
         )
     });
-    if false {
-        let target = &mut *avec![0.0f64; m * cs];
+});
+}
+    if true {
+        let target = &mut *avec![0.0f64; n * cs];
 
         unsafe {
             gemm(
@@ -367,7 +377,7 @@ fn main() -> eyre::Result<()> {
             bench_gemm,
         ];
 
-        {
+        if true {
             config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
                 (n * n * k) as f64 / time.to_secs()
             })
@@ -410,7 +420,7 @@ fn main() -> eyre::Result<()> {
         }
 
         for PlotArg(m) in args_small {
-            {
+            if true {
                 config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
                     (n * m * k) as f64 / time.to_secs()
                 })
@@ -451,7 +461,7 @@ fn main() -> eyre::Result<()> {
                 }
             }
 
-            {
+            if true {
                 config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
                     (n * m * k) as f64 / time.to_secs()
                 })
@@ -463,6 +473,8 @@ fn main() -> eyre::Result<()> {
                 bench.register_many(
                     &format!("k={k} m={m}"),
                     list![
+                        f[0].with_name(&format!("asm")),
+                        f[1].with_name(&format!("asm pack B")),
                         f[2].with_name(&format!("asm packA")),
                         f[3].with_name(&format!("asm packA pack B")),
                         f[4].with_name(&format!("gemm")),

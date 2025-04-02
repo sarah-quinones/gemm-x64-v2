@@ -1720,6 +1720,8 @@ impl Target {
                 mov!(rs, [info + info_rs]);
                 mov!(cs, [info + info_cs]);
 
+               
+
                 {
                     reg!(row);
                     reg!(col);
@@ -1731,6 +1733,7 @@ impl Target {
 
                     imul!(row, rs);
                     add!(ptr, row);
+                    
 
                     {
                         let alpha_ptr = row;
@@ -2069,9 +2072,9 @@ fn main() -> Result {
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd256.mask.data{QUOTE})]
                  static __MASK_F64_256__: [::core::arch::x86_64::__m256i; 5] = unsafe {{::core::mem::transmute([
                     [0, 0, 0, 0i64],
-                    [0, 0, 0, -1],
-                    [0, 0, -1, -1],
-                    [0, -1, -1, -1],
+                    [-1,0, 0, 0, ],
+                    [ -1, -1,0, 0,],
+                    [ -1, -1, -1,0,],
                     [-1, -1, -1, -1],
                 ])}};
 
