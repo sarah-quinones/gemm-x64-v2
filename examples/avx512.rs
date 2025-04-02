@@ -131,13 +131,13 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     let nr = if m <= 24 { 8 } else { 4 };
 
     let mut cs = Ord::min(m.next_power_of_two(), m.next_multiple_of(mr));
-    if  m > 48 {
+    if m > 48 {
         cs = Ord::max(4096, cs);
     }
 
     let packed_lhs = &mut *avec![[4096]| 0.0; m.next_multiple_of(mr) * k];
     let packed_rhs = &mut *avec![[4096]| 0.0; n.next_multiple_of(8) * k];
-   // dbg!(packed_lhs.as_ptr());
+    // dbg!(packed_lhs.as_ptr());
 
     let lhs = &mut *avec![[4096]| 0.0; cs * k];
     let rhs = &mut *avec![[4096]| 0.0; k * n];
@@ -148,22 +148,24 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
 
     let f = Ord::min(8, k.div_ceil(64));
 
-    let tall = m as f64 >= n as f64 * 1.25;
-
     let l1 = 64 / f;
     let l2 = 2048 / f;
     let l3 = 32768 / f;
 
+    let tall = m >= l3;
+
+    // dbg!(l2, l3);
+
     if m <= 48 && PACK_RHS {
         return bencher.skip();
     }
-    let pack_lhs = n > l3 / 2 / rayon::current_num_threads() && (n > rayon::current_num_threads() * 6 * nr || cs > 4096);
+    let pack_lhs = (n > 6 * nr && tall) || (n > 6 * nr * rayon::current_num_threads());
 
     if pack_lhs != PACK_LHS {
         return bencher.skip();
     }
 
-        let (row_chunk, col_chunk, rowmajor) = if false && tall {
+    let (row_chunk, col_chunk, rowmajor) = if false && tall {
         ([l3, l3, l3 / 2, l1, mr], [l3, l3, l3 / 2, l2, nr], true)
     } else {
         (
@@ -177,7 +179,6 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     };
     let mut row_chunk = row_chunk.map(|r| r.next_multiple_of(mr));
     let mut col_chunk = col_chunk.map(|c| c.next_multiple_of(nr));
- 
 
     let q = row_chunk.len();
 
@@ -225,73 +226,73 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     // dbg!(packed_lhs_rs);
 
     {
-    let lhs = Cell(lhs.as_ptr());
-    let rhs = Cell(rhs.as_ptr());
-    let packed_lhs = Cell(packed_lhs.as_mut_ptr());
-    let packed_rhs = Cell(packed_rhs.as_mut_ptr());
-    let bencher = Cell(bencher);
-    syncthreads::with_lock(rayon::current_num_threads(), ||{
-        {bencher}.0.bench(|| unsafe {
-        // A and B in this benchmark are column major
-        // row stride is    sizeof(T) * row_distance
-        // column stride is sizeof(T) * row_dim * col_distance
+        let lhs = Cell(lhs.as_ptr());
+        let rhs = Cell(rhs.as_ptr());
+        let packed_lhs = Cell(packed_lhs.as_mut_ptr());
+        let packed_rhs = Cell(packed_rhs.as_mut_ptr());
+        let bencher = Cell(bencher);
+        syncthreads::with_lock(rayon::current_num_threads(), || {
+            { bencher }.0.bench(|| unsafe {
+                // A and B in this benchmark are column major
+                // row stride is    sizeof(T) * row_distance
+                // column stride is sizeof(T) * row_dim * col_distance
 
-        kernel_rayon(
-            rayon::current_num_threads(),
-            if m <= 1 {
-                &F64_SIMD64
-            } else if m <= 2 {
-                &F64_SIMD128
-            } else if m <= 4 {
-                &F64_SIMD256[8..]
-            } else if m <= 24 {
-                &F64_SIMD512x8
-            } else {
-                &F64_SIMD512x4[..24]
-            },
-            mr,
-            nr,
-            {lhs}.0 as _,
-            if PACK_LHS {
-                {packed_lhs}.0 as _
-            } else {
-                {lhs}.0 as _
-            },
-                {rhs}.0 as _,
-            if PACK_RHS {
-                {packed_rhs}.0 as _
-            } else {
-                {rhs}.0 as _
-            },
-            m,
-            n,
-            &row_chunk,
-            &col_chunk,
-            &lhs_rs,
-            &rhs_cs,
-            &if PACK_LHS { packed_lhs_rs } else { lhs_rs },
-            &if PACK_RHS { packed_rhs_cs } else { rhs_cs },
-            0,
-            0,
-            Position { row: 0, col: 0 },
-            &MicrokernelInfo {
-                flags: ((rowmajor as usize) << 63),
-                depth: k,
-                lhs_rs: sizeof,
-                lhs_cs: cs as isize * sizeof,
-                rhs_rs: sizeof,
-                rhs_cs: k as isize * sizeof,
-                alpha: &raw const *&1.0 as _,
-                ptr: dst.as_mut_ptr() as _,
-                rs: sizeof,
-                cs: cs as isize * sizeof,
-                row_idx: null_mut(),
-                col_idx: null_mut(),
-            },
-        )
-    });
-});
-}
+                kernel_rayon(
+                    rayon::current_num_threads(),
+                    if m <= 1 {
+                        &F64_SIMD64
+                    } else if m <= 2 {
+                        &F64_SIMD128
+                    } else if m <= 4 {
+                        &F64_SIMD256[8..]
+                    } else if m <= 24 {
+                        &F64_SIMD512x8
+                    } else {
+                        &F64_SIMD512x4[..24]
+                    },
+                    mr,
+                    nr,
+                    { lhs }.0 as _,
+                    if PACK_LHS {
+                        { packed_lhs }.0 as _
+                    } else {
+                        { lhs }.0 as _
+                    },
+                    { rhs }.0 as _,
+                    if PACK_RHS {
+                        { packed_rhs }.0 as _
+                    } else {
+                        { rhs }.0 as _
+                    },
+                    m,
+                    n,
+                    &row_chunk,
+                    &col_chunk,
+                    &lhs_rs,
+                    &rhs_cs,
+                    &if PACK_LHS { packed_lhs_rs } else { lhs_rs },
+                    &if PACK_RHS { packed_rhs_cs } else { rhs_cs },
+                    0,
+                    0,
+                    Position { row: 0, col: 0 },
+                    &MicrokernelInfo {
+                        flags: ((rowmajor as usize) << 63),
+                        depth: k,
+                        lhs_rs: sizeof,
+                        lhs_cs: cs as isize * sizeof,
+                        rhs_rs: sizeof,
+                        rhs_cs: k as isize * sizeof,
+                        alpha: &raw const *&1.0 as _,
+                        ptr: dst.as_mut_ptr() as _,
+                        rs: sizeof,
+                        cs: cs as isize * sizeof,
+                        row_idx: null_mut(),
+                        col_idx: null_mut(),
+                    },
+                )
+            });
+        });
+    }
     if true {
         let target = &mut *avec![0.0f64; n * cs];
 
@@ -377,7 +378,7 @@ fn main() -> eyre::Result<()> {
             bench_gemm,
         ];
 
-        if true {
+        if false {
             config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
                 (n * n * k) as f64 / time.to_secs()
             })
@@ -461,7 +462,7 @@ fn main() -> eyre::Result<()> {
                 }
             }
 
-            if true {
+            if false {
                 config.plot_metric = PlotMetric::new(move |PlotArg(n), time: Picoseconds| {
                     (n * m * k) as f64 / time.to_secs()
                 })

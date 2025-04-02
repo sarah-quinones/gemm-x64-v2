@@ -1720,8 +1720,6 @@ impl Target {
                 mov!(rs, [info + info_rs]);
                 mov!(cs, [info + info_cs]);
 
-               
-
                 {
                     reg!(row);
                     reg!(col);
@@ -1733,7 +1731,6 @@ impl Target {
 
                     imul!(row, rs);
                     add!(ptr, row);
-                    
 
                     {
                         let alpha_ptr = row;
