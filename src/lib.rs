@@ -357,22 +357,22 @@ pub unsafe fn millikernel_par_colmajor(
                 }
             }
 
-            // dbg!(lhs);
-
-            call_microkernel(
-                microkernel,
-                lhs,
-                packed_lhs,
-                rhs,
-                packed_rhs,
-                row_chunk,
-                col_chunk,
-                &milli.micro,
-                &mut Position {
-                    row: row + pos.row,
-                    col: col + pos.col,
-                },
-            );
+            unsafe {
+                call_microkernel(
+                    microkernel,
+                    lhs,
+                    packed_lhs,
+                    rhs,
+                    packed_rhs,
+                    row_chunk,
+                    col_chunk,
+                    &milli.micro,
+                    &mut Position {
+                        row: row + pos.row,
+                        col: col + pos.col,
+                    },
+                );
+            }
 
             if !lhs.is_null() && lhs != packed_lhs {
                 pack_lhs_job[i].store(2, Ordering::Release);
@@ -523,8 +523,8 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
             let div = nrows.div_ceil(mr) / n_threads;
             let rem = nrows.div_ceil(mr) % n_threads;
 
-            if !tall {
-                syncthreads::for_each_raw(n_threads, |tid| {
+            if false {
+                spindle::for_each_raw(n_threads, |tid| {
                     let mut start = tid * div;
                     if tid <= rem {
                         start += tid;
@@ -555,17 +555,19 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
                         );
 
                         for j in 0..depth {
-                            core::ptr::copy_nonoverlapping(
-                                { lhs }
-                                    .0
-                                    .wrapping_byte_offset(j as isize * { milli }.0.micro.lhs_cs)
-                                    as *const f64,
-                                { packed_lhs }
-                                    .0
-                                    .wrapping_byte_offset((j * cs * size_of::<f64>()) as isize)
-                                    as *mut f64,
-                                nrows,
-                            );
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    { lhs }
+                                        .0
+                                        .wrapping_byte_offset(j as isize * { milli }.0.micro.lhs_cs)
+                                        as *const f64,
+                                    { packed_lhs }
+                                        .0
+                                        .wrapping_byte_offset((j * cs * size_of::<f64>()) as isize)
+                                        as *mut f64,
+                                    nrows,
+                                );
+                            }
                         }
                     }
                 });
@@ -580,7 +582,7 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
             let rem = depth % self.n_threads;
 
             if !wide {
-                syncthreads::for_each_raw(self.n_threads, |j| {
+                spindle::for_each_raw(self.n_threads, |j| {
                     let mut start = j * div;
                     if j <= rem {
                         start += j;
@@ -607,16 +609,18 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
 
                         for j in start..end {
                             for k in 0..ncols {
-                                core::ptr::copy_nonoverlapping(
-                                    { rhs }.0.wrapping_byte_offset(
-                                        k as isize * { milli }.0.micro.rhs_cs
-                                            + j as isize * { milli }.0.micro.rhs_rs,
-                                    ) as *const f64,
-                                    { packed_rhs }.0.wrapping_byte_offset(
-                                        ((k + j * rs) * size_of::<f64>()) as isize,
-                                    ) as *mut f64,
-                                    1,
-                                );
+                                unsafe {
+                                    core::ptr::copy_nonoverlapping(
+                                        { rhs }.0.wrapping_byte_offset(
+                                            k as isize * { milli }.0.micro.rhs_cs
+                                                + j as isize * { milli }.0.micro.rhs_rs,
+                                        ) as *const f64,
+                                        { packed_rhs }.0.wrapping_byte_offset(
+                                            ((k + j * rs) * size_of::<f64>()) as isize,
+                                        ) as *mut f64,
+                                        1,
+                                    );
+                                }
                             }
                         }
                     }
@@ -627,8 +631,7 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
 
         let gtid = AtomicUsize::new(0);
 
-        use rayon::prelude::*;
-        syncthreads::for_each_raw(self.n_threads, |_| unsafe {
+        spindle::for_each_raw(self.n_threads, |_| unsafe {
             loop {
                 let tid = gtid.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if tid >= n {
@@ -934,8 +937,7 @@ pub unsafe fn kernel_rayon(
     let packed_rhs = Cell(packed_rhs);
     let info = Cell(info);
 
-    // syncthreads::with_lock(n_threads, ||
-    ({
+    spindle::with_lock(n_threads, || {
         unsafe {
             kernel_imp(
                 &mut MilliPar {

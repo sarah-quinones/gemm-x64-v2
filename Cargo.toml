@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 crossbeam = "0.8.4"
 rayon = "1.10.0"
-syncthreads = { path = "../syncthreads" }
+spindle = "0.2.0"
 
 [dev-dependencies]
 aligned-vec = "0.6.4"

@@ -1,10 +1,22 @@
 #![allow(
+    non_snake_case,
     non_camel_case_types,
     non_upper_case_globals,
     dead_code,
     unused_labels,
     unused_macros
 )]
+
+const INFO_FLAGS: isize = 0 * WORD;
+const INFO_DEPTH: isize = 1 * WORD;
+const INFO_LHS_RS: isize = 2 * WORD;
+const INFO_LHS_CS: isize = 3 * WORD;
+const INFO_RHS_RS: isize = 4 * WORD;
+const INFO_RHS_CS: isize = 5 * WORD;
+const INFO_ALPHA: isize = 6 * WORD;
+const INFO_PTR: isize = 7 * WORD;
+const INFO_RS: isize = 8 * WORD;
+const INFO_CS: isize = 9 * WORD;
 
 use std::env;
 use std::fmt::Display;
@@ -107,15 +119,34 @@ macro_rules! reg {
 }
 
 macro_rules! label {
-    ($label: ident) => {
-        const $label: &'static str = ::std::stringify!($label);
-        {
-            let name = ::std::stringify!($label);
-            let func = name!();
-            align!();
-            asm!("{QUOTE}{name} @ {func}{QUOTE}:");
+    ({$(let $label: ident;)*}) => {$(
+        let $label = Cell::new(!ctx!().label(""));
+        defer!({
+            let mut __label__ = $label.get();
+            if (__label__ as isize) < 0 {
+                __label__ = !__label__;
+            }
+            ctx!().label_drop(__label__, "");
+        });
+    )*};
+
+    ($label: ident) => {{
+        let __label__ = $label.get();
+        if __label__ as isize >= 0 {
+            format!("{__label__}b")
+        } else {
+            format!("{!__label__}f")
         }
-    };
+    }};
+
+    ($label: ident = _) => {{
+        let __label__ = !$label.get();
+        assert!(__label__ as isize > 0);
+        $label.set(__label__);
+
+        align!();
+        asm!("{__label__}:");
+    }};
 }
 
 macro_rules! vxor {
@@ -402,6 +433,14 @@ macro_rules! sub {
     }};
 }
 
+macro_rules! and {
+    ($lhs: expr, $rhs: expr $(,)?) => {{
+        match ($lhs, $rhs) {
+            (lhs, rhs) => asm!("and {lhs}, {rhs}"),
+        }
+    }};
+}
+
 macro_rules! lea {
     ($lhs: expr, [$rhs: expr] $(,)?) => {{
         match ($lhs, $rhs) {
@@ -411,11 +450,10 @@ macro_rules! lea {
 }
 
 macro_rules! jmp {
-    ($label: ident) => {
-        let name = $label;
-        let func = name!();
-        asm!("jmp {QUOTE}{name} @ {func}{QUOTE}");
-    };
+    ($label: ident) => {{
+        let __label__ = label!($label);
+        asm!("jmp {__label__}");
+    }};
     ($($label: tt)*) => {
         match format!($($label)*) {
             label => asm!("jmp {QUOTE}{label}{QUOTE}"),
@@ -433,33 +471,29 @@ macro_rules! call {
 
 macro_rules! jnz {
     ($label: ident) => {
-        let name = $label;
-        let func = name!();
-        asm!("jnz {QUOTE}{name} @ {func}{QUOTE}");
+        let name = label!($label);
+        asm!("jnz {name}");
     };
 }
 
 macro_rules! jz {
     ($label: ident) => {
-        let name = $label;
-        let func = name!();
-        asm!("jz {QUOTE}{name} @ {func}{QUOTE}");
+        let name = label!($label);
+        asm!("jz {name}");
     };
 }
 
 macro_rules! jnc {
     ($label: ident) => {
-        let name = $label;
-        let func = name!();
-        asm!("jnc {QUOTE}{name} @ {func}{QUOTE}");
+        let name = label!($label);
+        asm!("jnc {name}");
     };
 }
 
 macro_rules! jc {
     ($label: ident) => {
-        let name = $label;
-        let func = name!();
-        asm!("jc {QUOTE}{name} @ {func}{QUOTE}");
+        let name = label!($label);
+        asm!("jc {name}");
     };
 }
 
@@ -721,7 +755,7 @@ impl Ctx {
     fn new() -> Self {
         Self {
             reg_busy: [const { Cell::new(false) }; 16],
-            label: Cell::new(2),
+            label: Cell::new(200000),
             code: RefCell::new(String::new()),
         }
     }
@@ -751,7 +785,6 @@ impl Ctx {
     fn label(&self, name: &str) -> usize {
         let _ = name;
         let label = self.label.get();
-        assert!(label < 10);
         self.label.set(label + 1);
         label
     }
@@ -804,6 +837,10 @@ impl Simd {
             _ => "xmm",
         }
         .to_string()
+    }
+
+    fn num_regs(self) -> isize {
+        if self.sizeof() == 64 { 32 } else { 16 }
     }
 
     fn sizeof(self) -> isize {
@@ -1146,6 +1183,396 @@ impl Target {
         format!("{instr} {self.simd.reg()}{dst}, {src}")
     }
 
+    fn transpose(self, n_regs: usize) -> (String, bool) {
+        if n_regs == 1 {
+            return (String::new(), false);
+        }
+
+        let ctx = Ctx::new();
+        setup!(ctx, self);
+        let t = self.simd.num_regs() as usize - 1;
+
+        let unpacklo32 = "vunpcklps";
+        let unpackhi32 = "vunpckhps";
+        let unpacklo64 = "vunpcklpd";
+        let unpackhi64 = "vunpckhpd";
+        let permute2x128 = if self.simd.num_regs() <= 16 {
+            "vperm2f128"
+        } else {
+            "vshuff64x2"
+        };
+        let shuffle64x2 = "vshuff64x2";
+
+        let in_t = match self.ty {
+            Ty::F32 => match n_regs {
+                2 => {
+                    let r = |i: usize| format!("xmm{i}");
+                    // 128 bit register, want to get low and high 64 bits
+                    asm!("{unpacklo32} {r(t)}, {r(0)}, {r(1)}");
+                    asm!("{unpacklo64} {r(0)}, {r(t)}, {r(t)}");
+                    asm!("{unpackhi64} {r(1)}, {r(t)}, {r(t)}");
+                    false
+                }
+                4 => {
+                    let r = |i: usize| format!("xmm{i}");
+                    let t = |i: usize| format!("xmm{t - i}");
+
+                    for i in 0..2 {
+                        let t0 = t(2 * i + 0);
+                        let t1 = t(2 * i + 1);
+                        let r0 = r(2 * i + 0);
+                        let r1 = r(2 * i + 1);
+                        asm!("{unpacklo32} {t0}, {r0}, {r1}");
+                        asm!("{unpackhi32} {t1}, {r0}, {r1}");
+                    }
+                    for i in 0..2 {
+                        let t0 = t(i);
+                        let t1 = t(i + 2);
+                        let r0 = r(i);
+                        let r1 = r(i + 2);
+                        asm!("{unpacklo64} {r0}, {t0}, {t1}");
+                        asm!("{unpackhi64} {r1}, {t0}, {t1}");
+                    }
+                    false
+                }
+                8 => {
+                    let r = |i: usize| format!("ymm{i}");
+                    let t = |i: usize| format!("ymm{t - i}");
+
+                    for i in 0..4 {
+                        let t0 = t(2 * i + 0);
+                        let t1 = t(2 * i + 1);
+                        let r0 = r(2 * i + 0);
+                        let r1 = r(2 * i + 1);
+                        asm!("{unpacklo32} {t0}, {r0}, {r1}");
+                        asm!("{unpackhi32} {t1}, {r0}, {r1}");
+                    }
+                    for j in 0..2 {
+                        for i in 0..2 {
+                            let t0 = t(4 * j + 2 * i + 0);
+                            let t1 = t(4 * j + 2 * i + 1);
+                            let r0 = r(4 * j + i + 0);
+                            let r1 = r(4 * j + i + 2);
+                            asm!("{unpacklo64} {r0}, {t0}, {t1}");
+                            asm!("{unpackhi64} {r1}, {t0}, {t1}");
+                        }
+                    }
+
+                    let idx = [0b00100000, 0b00110001];
+                    for i in 0..4 {
+                        let r0 = r(i);
+                        let r1 = r(i + 4);
+                        let t0 = t(i);
+                        let t1 = t(i + 4);
+
+                        asm!("{permute2x128} {t0}, {r0}, {r1}, {idx[0]}");
+                        asm!("{permute2x128} {t1}, {r0}, {r1}, {idx[1]}");
+                    }
+                    true
+                }
+                16 => {
+                    let r = |i: usize| format!("zmm{i}");
+                    let t = |i: usize| format!("zmm{t - i}");
+
+                    for i in 0..8 {
+                        let t0 = t(2 * i + 0);
+                        let t1 = t(2 * i + 1);
+                        let r0 = r(2 * i + 0);
+                        let r1 = r(2 * i + 1);
+                        asm!("{unpacklo32} {t0}, {r0}, {r1}");
+                        asm!("{unpackhi32} {t1}, {r0}, {r1}");
+                    }
+                    for j in 0..4 {
+                        for i in 0..2 {
+                            let r0 = r(4 * j + 2 * i + 0);
+                            let r1 = r(4 * j + 2 * i + 1);
+                            let t0 = t(4 * j + i + 0);
+                            let t1 = t(4 * j + i + 2);
+                            asm!("{unpacklo64} {r0}, {t0}, {t1}");
+                            asm!("{unpackhi64} {r1}, {t0}, {t1}");
+                        }
+                    }
+
+                    let idx = [0b10001000, 0b11011101];
+                    for j in 0..2 {
+                        for i in 0..4 {
+                            let r0 = r(8 * j + i + 0);
+                            let r1 = r(8 * j + i + 4);
+                            let t0 = t(8 * j + 2 * i + 0);
+                            let t1 = t(8 * j + 2 * i + 1);
+
+                            asm!("{shuffle64x2} {t0}, {r0}, {r1}, {idx[0]}");
+                            asm!("{shuffle64x2} {t1}, {r0}, {r1}, {idx[1]}");
+                        }
+                    }
+
+                    for j in 0..2 {
+                        for i in 0..4 {
+                            let t0 = t(j + 2 * i + 0);
+                            let t1 = t(j + 2 * i + 8);
+                            let r0 = r(j + 2 * i + 0);
+                            let r1 = r(j + 2 * i + 8);
+
+                            asm!("{shuffle64x2} {r0}, {t0}, {t1}, {idx[0]}");
+                            asm!("{shuffle64x2} {r1}, {t0}, {t1}, {idx[1]}");
+                        }
+                    }
+
+                    false
+                }
+                _ => unreachable!(),
+            },
+            Ty::F64 | Ty::C32 => match n_regs {
+                2 => {
+                    let r = |i: usize| format!("xmm{i}");
+                    let t = |i: usize| format!("xmm{t - i}");
+
+                    let t0 = t(0);
+                    let t1 = t(1);
+                    let r0 = r(0);
+                    let r1 = r(1);
+                    asm!("{unpacklo64} {t0}, {r0}, {r1}");
+                    asm!("{unpackhi64} {t1}, {r0}, {r1}");
+                    true
+                }
+                4 => {
+                    let r = |i: usize| format!("ymm{i}");
+                    let t = |i: usize| format!("ymm{t - i}");
+
+                    for i in 0..2 {
+                        let t0 = t(2 * i + 0);
+                        let t1 = t(2 * i + 1);
+                        let r0 = r(2 * i + 0);
+                        let r1 = r(2 * i + 1);
+                        asm!("{unpacklo64} {t0}, {r0}, {r1}");
+                        asm!("{unpackhi64} {t1}, {r0}, {r1}");
+                    }
+
+                    let idx = [0b00100000, 0b00110001];
+                    for i in 0..2 {
+                        let t0 = t(i + 0);
+                        let t1 = t(i + 2);
+                        let r0 = r(i + 0);
+                        let r1 = r(i + 2);
+                        asm!("{permute2x128} {r0}, {t0}, {t1}, {idx[0]}");
+                        asm!("{permute2x128} {r1}, {t0}, {t1}, {idx[1]}");
+                    }
+                    false
+                }
+                8 => {
+                    let r = |i: usize| format!("zmm{i}");
+                    let t = |i: usize| format!("zmm{t - i}");
+
+                    for i in 0..4 {
+                        let t0 = t(2 * i + 0);
+                        let t1 = t(2 * i + 1);
+                        let r0 = r(2 * i + 0);
+                        let r1 = r(2 * i + 1);
+                        asm!("{unpacklo64} {t0}, {r0}, {r1}");
+                        asm!("{unpackhi64} {t1}, {r0}, {r1}");
+                    }
+
+                    // tau:
+                    //  t0  t2  t3  t1
+                    //
+                    // a00 a02 a03 a01
+                    //   0 a12 a13   0
+                    //   0   0 a23   0
+
+                    let idx = [0b10001000, 0b11011101];
+                    for j in 0..2 {
+                        for i in 0..2 {
+                            let t0 = t(4 * j + i + 0);
+                            let t1 = t(4 * j + i + 2);
+                            let r0 = r(4 * j + 2 * i + 0);
+                            let r1 = r(4 * j + 2 * i + 1);
+                            asm!("{shuffle64x2} {r0}, {t0}, {t1}, {idx[0]}");
+                            asm!("{shuffle64x2} {r1}, {t0}, {t1}, {idx[1]}");
+                        }
+                    }
+
+                    for j in 0..2 {
+                        for i in 0..2 {
+                            let t0 = t(j + 2 * i + 0);
+                            let t1 = t(j + 2 * i + 4);
+                            let r0 = r(j + 2 * i + 0);
+                            let r1 = r(j + 2 * i + 4);
+                            asm!("{shuffle64x2} {t0}, {r0}, {r1}, {idx[0]}");
+                            asm!("{shuffle64x2} {t1}, {r0}, {r1}, {idx[1]}");
+                        }
+                    }
+
+                    true
+                }
+                _ => unreachable!(),
+            },
+            Ty::C64 => match n_regs {
+                2 => {
+                    let r = |i: usize| format!("ymm{i}");
+                    let t = |i: usize| format!("ymm{t - i}");
+
+                    let idx = [0b00100000, 0b00110001];
+
+                    let t0 = t(0);
+                    let t1 = t(1);
+                    let r0 = r(0);
+                    let r1 = r(1);
+                    asm!("{permute2x128} {t0}, {r0}, {r1}, {idx[0]}");
+                    asm!("{permute2x128} {t1}, {r0}, {r1}, {idx[1]}");
+
+                    true
+                }
+                4 => {
+                    let r = |i: usize| format!("zmm{i}");
+                    let t = |i: usize| format!("zmm{t - i}");
+
+                    let idx = [0b10001000, 0b11011101];
+
+                    for i in 0..2 {
+                        let r0 = r(2 * i + 0);
+                        let r1 = r(2 * i + 1);
+                        let t0 = t(2 * i + 0);
+                        let t1 = t(2 * i + 1);
+
+                        asm!("{shuffle64x2} {t0}, {r0}, {r1}, {idx[0]}");
+                        asm!("{shuffle64x2} {t1}, {r0}, {r1}, {idx[1]}");
+                    }
+
+                    for i in 0..2 {
+                        let r0 = r(i + 0);
+                        let r1 = r(i + 2);
+                        let t0 = t(i + 0);
+                        let t1 = t(i + 2);
+
+                        asm!("{shuffle64x2} {r0}, {t0}, {t1}, {idx[0]}");
+                        asm!("{shuffle64x2} {r1}, {t0}, {t1}, {idx[1]}");
+                    }
+
+                    false
+                }
+                _ => unreachable!(),
+            },
+        };
+
+        (ctx.code.borrow().clone(), in_t)
+    }
+
+    fn pack_row_major(self, m: isize) -> (String, String) {
+        let Self { ty, simd } = self;
+        let bits = simd.sizeof() * 8;
+
+        let ctx = Ctx::new();
+        setup!(ctx, self);
+        let suffix = format!("[with m = {m * self.len()}]");
+        let src = rax;
+        let dst = r15;
+        let nrows = r8;
+        let info = rsi;
+        let prefix = format!("{*PREFIX} gemm.pack.rowmajor.b{ty.sizeof() * 8}.simd{bits}");
+
+        ctx[rsp].set(true);
+        ctx[src].set(true);
+        ctx[dst].set(true);
+        ctx[nrows].set(true);
+        ctx[info].set(true);
+
+        func!("{prefix} {suffix}");
+
+        {
+            alloca!(src);
+            alloca!(dst);
+            reg!(src_rs);
+            reg!(depth);
+            reg!(depth_down);
+
+            mov!(src_rs, [info + INFO_LHS_RS]);
+            mov!(depth, [info + INFO_DEPTH]);
+
+            let min_nrows = (m - 1) * self.len();
+            let dst_cs = simd.sizeof() * m;
+
+            for j in 0..simd.num_regs() {
+                vxor!(zmm(j), zmm(j), zmm(j));
+            }
+
+            let mut len = self.len();
+
+            while len >= 1 {
+                label!({
+                    let packing;
+                });
+
+                assert!(len <= 16);
+
+                mov!(depth_down, depth);
+                and!(depth_down, -len as i8);
+                sub!(depth, depth_down);
+
+                test!(depth_down, depth_down);
+
+                label!(packing = _);
+                {
+                    label!({
+                        let end;
+                    });
+
+                    alloca!(src);
+                    alloca!(nrows);
+
+                    for i in 0..min_nrows / len {
+                        for j in 0..len {
+                            vmov!(zmm(j), [src]);
+                            add!(src, src_rs);
+                        }
+
+                        let (c, in_t) = self.transpose(len as _);
+                        *ctx.code.borrow_mut() += &c;
+
+                        for j in 0..len {
+                            vmov!(
+                                [dst + (i * simd.sizeof() + j * dst_cs)],
+                                zmm(if in_t { simd.num_regs() - 1 - j } else { j })
+                            );
+                        }
+                    }
+                    let i = min_nrows / len;
+                    for j in 0..len {
+                        vmov!(zmm(j), [src]);
+                        add!(src, src_rs);
+
+                        cmp!(nrows, i * len + j);
+                        jz!(end);
+                    }
+                    label!(end = _);
+
+                    let (c, in_t) = self.transpose(len as _);
+                    *ctx.code.borrow_mut() += &c;
+
+                    for j in 0..len {
+                        vmov!(
+                            [dst + (i * simd.sizeof() + j * dst_cs)],
+                            zmm(if in_t { simd.num_regs() - 1 - j } else { j })
+                        );
+                    }
+
+                    for j in 0..len {
+                        vmov!([dst + (i * simd.sizeof() + j * dst_cs)], zmm(j));
+                    }
+                }
+                if len == 1 {
+                    dec!(depth_down);
+                } else {
+                    sub!(depth_down, len);
+                }
+                jnz!(packing);
+
+                len /= 2;
+            }
+        }
+
+        (name!().clone(), ctx.code.borrow().clone())
+    }
+
     fn microkernel(self, m: isize, n: isize) -> (String, String) {
         let Self { ty, simd } = self;
         let bits = simd.sizeof() * 8;
@@ -1165,17 +1592,9 @@ impl Target {
         let nrows = r8;
         let ncols = r9;
 
-        let info_flags = 0 * WORD;
-        let info_depth = 1 * WORD;
-        let info_lhs_rs = 2 * WORD;
-        let info_lhs_cs = 3 * WORD;
-        let info_rhs_rs = 4 * WORD;
-        let info_rhs_cs = 5 * WORD;
-        let info_alpha = 6 * WORD;
-
-        let info_ptr = 7 * WORD;
-        let info_rs = 8 * WORD;
-        let info_cs = 9 * WORD;
+        let flags_accum = 0;
+        let flags_conj_lhs = 1;
+        let flags_conj_diff = 2;
 
         ctx[rsp].set(true);
         ctx[lhs].set(true);
@@ -1198,20 +1617,26 @@ impl Target {
             let rhs_cs;
 
             let main = {
+                label!({
+                    let row_check;
+                    let col_check;
+                    let prologue;
+                });
+
                 func!("{prefix} {suffix}");
-                label!(row_check);
+                label!(row_check = _);
                 if m > 1 {
                     cmp!(nrows, (m - 1) * self.len() + 1);
                     jnc!(col_check);
                     jmp!("{prefix} [with m = {(m - 1) * self.len()}, n = {n}]");
                 }
-                label!(col_check);
+                label!(col_check = _);
                 if n > 1 {
                     cmp!(ncols, n);
                     jnc!(prologue);
                     jmp!("{prefix} [with m = {m * self.len()}, n = {n - 1}]");
                 }
-                label!(prologue);
+                label!(prologue = _);
 
                 alloca!(lhs);
                 alloca!(rhs);
@@ -1224,10 +1649,10 @@ impl Target {
                 reg!(&rhs_cs);
                 reg!(&mask_ptr);
 
-                mov!(lhs_rs, [info + info_lhs_rs]);
-                mov!(lhs_cs, [info + info_lhs_cs]);
-                mov!(rhs_rs, [info + info_rhs_rs]);
-                mov!(rhs_cs, [info + info_rhs_cs]);
+                mov!(lhs_rs, [info + INFO_LHS_RS]);
+                mov!(lhs_cs, [info + INFO_LHS_CS]);
+                mov!(rhs_rs, [info + INFO_RHS_RS]);
+                mov!(rhs_cs, [info + INFO_RHS_CS]);
 
                 {
                     reg!(tmp);
@@ -1251,6 +1676,10 @@ impl Target {
                 }
 
                 if need_mask {
+                    label!({
+                        let no_mask;
+                    });
+
                     sub!(nrows, m * self.len());
 
                     jnc!(no_mask);
@@ -1274,29 +1703,45 @@ impl Target {
                             );
                         }
                     }
-                    label!(no_mask);
+                    label!(no_mask = _);
 
                     add!(nrows, m * self.len());
                 }
 
                 reg!(&depth);
-                mov!(depth, [info + info_depth]);
+                mov!(depth, [info + INFO_DEPTH]);
+
+                label!({
+                    let colmajor;
+                    let rowmajor;
+                    let strided;
+                    let load;
+                    let mask;
+                    let epilogue;
+                    let epilogue_store;
+                    let epilogue_mask;
+                    let epilogue_store_overwrite;
+                    let epilogue_store_add;
+                    let epilogue_mask_overwrite;
+                    let epilogue_mask_add;
+                    let end;
+                });
 
                 cmp!(lhs_rs, ty.sizeof());
                 jz!(colmajor);
                 cmp!(lhs_cs, ty.sizeof());
                 jz!(rowmajor);
 
-                label!(strided);
+                label!(strided = _);
                 {
                     abort!();
                 }
 
-                label!(rowmajor);
+                label!(rowmajor = _);
                 {
                     abort!();
                 }
-                label!(colmajor);
+                label!(colmajor = _);
                 {
                     cmp!(nrows, m * self.len());
                     jnc!(load);
@@ -1312,93 +1757,108 @@ impl Target {
                     }
                 }
 
-                label!(load);
+                label!(load = _);
                 {
+                    label!({
+                        let load_A;
+                        let load_A_noB;
+                        let load_A_B;
+                        let load_noA_noB;
+                        let load_noA_B;
+                    });
                     cmp!(packed_lhs, lhs);
                     jnz!(load_A);
                     cmp!(packed_rhs, rhs);
                     jnz!(load_noA_B);
 
-                    label!(load_noA_noB);
+                    label!(load_noA_noB = _);
                     {
                         call!("{prefix}.load {suffix}");
                         jmp!(epilogue);
                     }
-                    label!(load_A);
+                    label!(load_A = _);
                     {
                         cmp!(packed_rhs, rhs);
                         jnz!(load_A_B);
                     }
 
-                    label!(load_A_noB);
+                    label!(load_A_noB = _);
                     {
                         call!("{prefix}.load.packA {suffix}");
                         jmp!(epilogue);
                     }
-                    label!(load_noA_B);
+                    label!(load_noA_B = _);
                     {
                         call!("{prefix}.load.packB {suffix}");
                         jmp!(epilogue);
                     }
-                    label!(load_A_B);
+                    label!(load_A_B = _);
                     {
                         call!("{prefix}.load.packA.packB {suffix}");
                         jmp!(epilogue);
                     }
                 }
 
-                label!(mask);
+                label!(mask = _);
                 {
+                    label!({
+                        let mask_A;
+                        let mask_A_noB;
+                        let mask_A_B;
+                        let mask_noA_noB;
+                        let mask_noA_B;
+                    });
+
                     if need_mask {
                         cmp!(packed_lhs, lhs);
                         jnz!(mask_A);
                         cmp!(packed_rhs, rhs);
                         jnz!(mask_noA_B);
 
-                        label!(mask_noA_noB);
+                        label!(mask_noA_noB = _);
                         {
                             call!("{prefix}.mask {suffix}");
                             jmp!(epilogue);
                         }
-                        label!(mask_A);
+                        label!(mask_A = _);
                         {
                             cmp!(packed_rhs, rhs);
                             jnz!(mask_A_B);
                         }
 
-                        label!(mask_A_noB);
+                        label!(mask_A_noB = _);
                         {
                             call!("{prefix}.mask.packA {suffix}");
                             jmp!(epilogue);
                         }
-                        label!(mask_noA_B);
+                        label!(mask_noA_B = _);
                         {
                             call!("{prefix}.mask.packB {suffix}");
                             jmp!(epilogue);
                         }
-                        label!(mask_A_B);
+                        label!(mask_A_B = _);
                         {
                             call!("{prefix}.mask.packA.packB {suffix}");
                             jmp!(epilogue);
                         }
                     }
                 }
-                label!(epilogue);
+                label!(epilogue = _);
 
                 cmp!(nrows, m * self.len());
-                jnc!(epilogue_load);
+                jnc!(epilogue_store);
 
-                label!(epilogue_mask);
+                label!(epilogue_mask = _);
                 {
                     if need_mask {
-                        test!([info + info_flags], 1);
-                        jz!(epilogue_mask_overwrite);
+                        bt!([info + INFO_FLAGS], flags_accum);
+                        jnc!(epilogue_mask_overwrite);
 
-                        label!(epilogue_mask_add);
+                        label!(epilogue_mask_add = _);
                         call!("{prefix}.epilogue.mask.add {suffix}");
                         jmp!(end);
 
-                        label!(epilogue_mask_overwrite);
+                        label!(epilogue_mask_overwrite = _);
                         call!("{prefix}.epilogue.mask.overwrite {suffix}");
                         jmp!(end);
                     } else {
@@ -1406,21 +1866,21 @@ impl Target {
                     }
                 }
 
-                label!(epilogue_load);
+                label!(epilogue_store = _);
                 {
-                    test!([info + info_flags], 1);
-                    jz!(epilogue_store_overwrite);
+                    bt!([info + INFO_FLAGS], flags_accum);
+                    jnc!(epilogue_store_overwrite);
 
-                    label!(epilogue_store_add);
+                    label!(epilogue_store_add = _);
                     call!("{prefix}.epilogue.store.add {suffix}");
                     jmp!(end);
 
-                    label!(epilogue_store_overwrite);
+                    label!(epilogue_store_overwrite = _);
                     call!("{prefix}.epilogue.store.overwrite {suffix}");
                     jmp!(end);
                 }
 
-                label!(end);
+                label!(end = _);
 
                 name!().clone()
             };
@@ -1455,14 +1915,18 @@ impl Target {
                             func!(
                                 "{prefix}{__conj__}{__mask__}{__pack_lhs__}{__pack_rhs__} {suffix}"
                             );
+                            label!({
+                                let start;
+                                let nanokernel;
+                            });
                             if self.is_cplx() && !conj {
-                                bt!([info + info_flags], 2);
+                                bt!([info + INFO_FLAGS], flags_conj_diff);
                                 jnc!(start);
                                 jmp!(
                                     "{prefix}.conj{__mask__}{__pack_lhs__}{__pack_rhs__} {suffix}"
                                 );
                             }
-                            label!(start);
+                            label!(start = _);
 
                             let rhs_neg_cs = lhs_rs;
 
@@ -1474,7 +1938,7 @@ impl Target {
                                 kmov!(k(1), [mask_ptr]);
                             }
 
-                            label!(nanokernel);
+                            label!(nanokernel = _);
                             let bcst = bits == 512 && m == 1 && !pack_rhs;
 
                             for iter in 0..unroll {
@@ -1716,9 +2180,9 @@ impl Target {
                 reg!(ptr);
                 reg!(rs);
                 reg!(cs);
-                mov!(ptr, [info + info_ptr]);
-                mov!(rs, [info + info_rs]);
-                mov!(cs, [info + info_cs]);
+                mov!(ptr, [info + INFO_PTR]);
+                mov!(rs, [info + INFO_RS]);
+                mov!(cs, [info + INFO_CS]);
 
                 {
                     reg!(row);
@@ -1748,46 +2212,57 @@ impl Target {
                                 zmm(alpha_im),
                                 [rip + &format!("{*PREFIX} gemm.microkernel.{ty}.flip.im.data")]
                             );
-                            bt!([info + info_flags], 1);
+                            label!({
+                                let xor;
+                                let conj_lhs;
+                                let conj_lhs_conj_rhs;
+                                let conj_lhs_no_conj_rhs;
+                                let conj_lhs_no_conj_rhs;
+                                let no_conj_lhs;
+                                let no_conj_lhs_conj_rhs;
+                                let no_conj_lhs_no_conj_rhs;
+                                let no_conj_lhs_no_conj_rhs;
+                            });
+                            bt!([info + INFO_FLAGS], flags_conj_lhs);
                             jnc!(no_conj_lhs);
 
-                            label!(conj_lhs);
+                            label!(conj_lhs = _);
                             {
-                                bt!([info + info_flags], 2);
+                                bt!([info + INFO_FLAGS], flags_conj_diff);
                                 jc!(conj_lhs_no_conj_rhs);
 
-                                label!(conj_lhs_conj_rhs);
+                                label!(conj_lhs_conj_rhs = _);
                                 {
                                     vxor!(zmm(alpha_re), zmm(alpha_re), zmm(alpha_im));
                                     jmp!(xor);
                                 }
-                                label!(conj_lhs_no_conj_rhs);
+                                label!(conj_lhs_no_conj_rhs = _);
                                 {
                                     vxor!(zmm(alpha_re), zmm(alpha_re), zmm(alpha_re));
                                     jmp!(xor);
                                 }
                             }
 
-                            label!(no_conj_lhs);
+                            label!(no_conj_lhs = _);
                             {
-                                bt!([info + info_flags], 2);
+                                bt!([info + INFO_FLAGS], flags_conj_diff);
                                 jnc!(no_conj_lhs_no_conj_rhs);
 
-                                label!(no_conj_lhs_conj_rhs);
+                                label!(no_conj_lhs_conj_rhs = _);
                                 {
                                     vmov!(zmm(alpha_re), zmm(alpha_im));
                                     jmp!(xor);
                                 }
-                                label!(no_conj_lhs_no_conj_rhs);
+                                label!(no_conj_lhs_no_conj_rhs = _);
                                 {}
                             }
-                            label!(xor);
+                            label!(xor = _);
                             for i in 0..m * n {
                                 vxor!(zmm(i), zmm(i), zmm(alpha_re));
                             }
                         }
 
-                        mov!(alpha_ptr, [info + info_alpha]);
+                        mov!(alpha_ptr, [info + INFO_ALPHA]);
                         vbroadcast!(zmm(alpha_re), [alpha_ptr]);
                         if self.is_cplx() {
                             vbroadcast!(zmm(alpha_im), [alpha_ptr + ty.sizeof() / 2]);
@@ -1817,7 +2292,7 @@ impl Target {
                                 if !mask || i + 1 < m {
                                     if add {
                                         if self.is_cplx() {
-                                            vadd!(zmm(src), zmm(alpha_re), [ptr]);
+                                            vadd!(zmm(src), zmm(src), [ptr]);
                                         } else {
                                             vfma213!(zmm(src), zmm(alpha_re), [ptr]);
                                         }
@@ -1840,10 +2315,15 @@ impl Target {
                         }
                     }
                 }
+                label!({
+                    let rowmajor;
+                    let colmajor;
+                    let end;
+                });
                 bt!([rsi], 63);
                 jc!(rowmajor);
 
-                label!(colmajor);
+                label!(colmajor = _);
                 {
                     if mask {
                         add!([position], nrows);
@@ -1862,7 +2342,7 @@ impl Target {
                 }
                 jmp!(end);
 
-                label!(rowmajor);
+                label!(rowmajor = _);
                 {
                     add!([position + WORD], n);
                     sub!(ncols, n);
@@ -1878,7 +2358,7 @@ impl Target {
                     }
                 }
 
-                label!(end);
+                label!(end = _);
             }
         }
 
@@ -1888,6 +2368,23 @@ impl Target {
 
 fn main() -> Result {
     let mut code = String::new();
+
+    let mut b128_simd512 = vec![];
+    let mut b64_simd512 = vec![];
+    let mut b32_simd512 = vec![];
+
+    let mut b128_simd256 = vec![];
+    let mut b64_simd256 = vec![];
+    let mut b32_simd256 = vec![];
+
+    let mut b128_simd128 = vec![];
+    let mut b64_simd128 = vec![];
+    let mut b32_simd128 = vec![];
+
+    let mut b64_simd64 = vec![];
+    let mut b32_simd64 = vec![];
+
+    let mut b32_simd32 = vec![];
 
     let mut f32_simd512 = vec![];
     let mut c32_simd512 = vec![];
@@ -1915,21 +2412,27 @@ fn main() -> Result {
 
     let mut f32_simd32 = vec![];
 
-    for (out, ty) in [
-        (&mut f32_simd512, Ty::F32),
-        (&mut c32_simd512, Ty::C32),
-        (&mut f64_simd512, Ty::F64),
-        (&mut c64_simd512, Ty::C64),
+    for (out, pack, ty) in [
+        (&mut f32_simd512, &mut b32_simd512, Ty::F32),
+        (&mut c32_simd512, &mut vec![], Ty::C32),
+        (&mut f64_simd512, &mut b64_simd512, Ty::F64),
+        (&mut c64_simd512, &mut b128_simd512, Ty::C64),
     ] {
         for m in (1..=6).rev() {
+            let target = Target {
+                ty,
+                simd: Simd::_512,
+            };
+
             let last = if m == 1 { 8 } else { 4 };
 
-            for n in 1..=last {
-                let target = Target {
-                    ty,
-                    simd: Simd::_512,
-                };
+            let (name, f) = target.pack_row_major(m);
+            if ty != Ty::C32 {
+                pack.push(name);
+                code += &f;
+            }
 
+            for n in 1..=last {
                 let (name, f) = target.microkernel(m, n);
                 code += &f;
                 out.push(name);
@@ -1959,21 +2462,27 @@ fn main() -> Result {
         }
     }
 
-    for (out, ty) in [
-        (&mut f32_simd256, Ty::F32),
-        (&mut c32_simd256, Ty::C32),
-        (&mut f64_simd256, Ty::F64),
-        (&mut c64_simd256, Ty::C64),
+    for (out, pack, ty) in [
+        (&mut f32_simd256, &mut b32_simd256, Ty::F32),
+        (&mut c32_simd256, &mut vec![], Ty::C32),
+        (&mut f64_simd256, &mut b64_simd256, Ty::F64),
+        (&mut c64_simd256, &mut b128_simd256, Ty::C64),
     ] {
         for m in (1..=3).rev() {
+            let target = Target {
+                ty,
+                simd: Simd::_256,
+            };
+
             let last = if m == 1 { 8 } else { 4 };
 
-            for n in 1..=last {
-                let target = Target {
-                    ty,
-                    simd: Simd::_256,
-                };
+            let (name, f) = target.pack_row_major(m);
+            if ty != Ty::C32 {
+                pack.push(name);
+                code += &f;
+            }
 
+            for n in 1..=last {
                 let (name, f) = target.microkernel(m, n);
                 code += &f;
                 out.push(name);
@@ -1981,20 +2490,26 @@ fn main() -> Result {
         }
     }
 
-    for (out, ty, simd) in [
-        (&mut f32_simd128, Ty::F32, Simd::_128),
-        (&mut c32_simd128, Ty::C32, Simd::_128),
-        (&mut f64_simd128, Ty::F64, Simd::_128),
-        (&mut c64_simd128, Ty::C64, Simd::_128),
-        (&mut f32_simd64, Ty::F32, Simd::_64),
-        (&mut c32_simd64, Ty::C32, Simd::_64),
-        (&mut f64_simd64, Ty::F64, Simd::_64),
-        (&mut f32_simd32, Ty::F32, Simd::_32),
+    for (out, pack, ty, simd) in [
+        (&mut f32_simd128, &mut b32_simd128, Ty::F32, Simd::_128),
+        (&mut c32_simd128, &mut vec![], Ty::C32, Simd::_128),
+        (&mut f64_simd128, &mut b64_simd128, Ty::F64, Simd::_128),
+        (&mut c64_simd128, &mut b128_simd128, Ty::C64, Simd::_128),
+        (&mut f32_simd64, &mut b32_simd64, Ty::F32, Simd::_64),
+        (&mut c32_simd64, &mut vec![], Ty::C32, Simd::_64),
+        (&mut f64_simd64, &mut b64_simd64, Ty::F64, Simd::_64),
+        (&mut f32_simd32, &mut b32_simd32, Ty::F32, Simd::_32),
     ] {
         for m in (1..=1).rev() {
-            for n in 1..=8 {
-                let target = Target { ty, simd };
+            let target = Target { ty, simd };
 
+            let (name, f) = target.pack_row_major(m);
+            if ty != Ty::C32 {
+                pack.push(name);
+                code += &f;
+            }
+
+            for n in 1..=8 {
                 let (name, f) = target.microkernel(m, n);
                 code += &f;
                 out.push(name);
@@ -2059,20 +2574,20 @@ fn main() -> Result {
             "
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd128.mask.data{QUOTE})]
                  static __MASK_F32_128__: [::core::arch::x86_64::__m128i; 5] = unsafe {{::core::mem::transmute([
-                    [0, 0, 0, 0i32],
-                    [0, 0, 0, -1],
-                    [0, 0, -1, -1],
-                    [0, -1, -1, -1],
-                    [-1, -1, -1, -1],
+                    [ 0,  0,  0, 0i32],
+                    [-1,  0,  0,    0],
+                    [-1, -1,  0,    0],
+                    [-1, -1, -1,    0],
+                    [-1, -1, -1,   -1],
                 ])}};
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd256.mask.data{QUOTE})]
                  static __MASK_F64_256__: [::core::arch::x86_64::__m256i; 5] = unsafe {{::core::mem::transmute([
-                    [0, 0, 0, 0i64],
-                    [-1,0, 0, 0, ],
-                    [ -1, -1,0, 0,],
-                    [ -1, -1, -1,0,],
-                    [-1, -1, -1, -1],
+                    [ 0,  0,  0, 0i64],
+                    [-1,  0,  0,    0],
+                    [-1, -1,  0,    0],
+                    [-1, -1, -1,    0],
+                    [-1, -1, -1,   -1],
                 ])}};
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd512.mask.data{QUOTE})]
@@ -2090,9 +2605,9 @@ fn main() -> Result {
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd256.mask.data{QUOTE})]
                  static __MASK_C64_256__: [::core::arch::x86_64::__m256i; 3] = unsafe {{::core::mem::transmute([
-                    [0, 0, 0, 0i64],
-                    [0, 0, -1, -1],
-                    [-1, -1, -1, -1],
+                    [ 0,  0,  0, 0i64],
+                    [-1, -1,  0,    0],
+                    [-1, -1, -1,   -1],
                 ])}};
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd512.mask.data{QUOTE})]
@@ -2106,15 +2621,15 @@ fn main() -> Result {
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd256.mask.data{QUOTE})]
                  static __MASK_F32_256__: [::core::arch::x86_64::__m256i; 9] = unsafe {{::core::mem::transmute([
-                    [0, 0, 0, 0, 0, 0, 0, 0i32],
-                    [0, 0, 0, 0,0, 0, 0, -1],
-                    [0, 0, 0, 0,0, 0, -1, -1],
-                    [0, 0, 0, 0,0, -1, -1, -1],
-                    [0, 0, 0, 0,-1, -1, -1, -1],
-                    [0, 0, 0, -1, -1, -1, -1, -1],
-                    [0, 0, -1, -1, -1, -1, -1, -1],
-                    [0, -1, -1, -1, -1, -1, -1, -1],
-                    [-1, -1, -1, -1, -1, -1, -1, -1],
+                    [ 0,  0,  0,  0,  0,  0,  0, 0i32],
+                    [-1,  0,  0,  0,  0,  0,  0,    0],
+                    [-1, -1,  0,  0,  0,  0,  0,    0],
+                    [-1, -1, -1,  0,  0,  0,  0,    0],
+                    [-1, -1, -1, -1,  0,  0,  0,    0],
+                    [-1, -1, -1, -1, -1,  0,  0,    0],
+                    [-1, -1, -1, -1, -1, -1,  0,    0],
+                    [-1, -1, -1, -1, -1, -1, -1,    0],
+                    [-1, -1, -1, -1, -1, -1, -1,   -1],
                 ])}};
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd512.mask.data{QUOTE})]
@@ -2140,11 +2655,11 @@ fn main() -> Result {
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd256.mask.data{QUOTE})]
                  static __MASK_C32_256__: [::core::arch::x86_64::__m256i; 5] = unsafe {{::core::mem::transmute([
-                    [0, 0, 0, 0, 0, 0, 0, 0i32],
-                    [0, 0, 0, 0,0, 0, -1, -1],
-                    [0, 0, 0, 0,-1, -1, -1, -1],
-                    [0, 0, -1, -1, -1, -1, -1, -1],
-                    [-1, -1, -1, -1, -1, -1, -1, -1],
+                    [ 0,  0,  0,  0,  0,  0,  0, 0i32],
+                    [-1, -1,  0,  0,  0,  0,  0,    0],
+                    [-1, -1, -1, -1,  0,  0,  0,    0],
+                    [-1, -1, -1, -1, -1, -1,  0,    0],
+                    [-1, -1, -1, -1, -1, -1, -1,   -1],
                 ])}};
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd512.mask.data{QUOTE})]

@@ -166,7 +166,7 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
     }
 
     let (row_chunk, col_chunk, rowmajor) = if false && tall {
-        ([l3, l3, l3 / 2, l1, mr], [l3, l3, l3 / 2, l2, nr], true)
+        ([m, l3, l3 / 2, l1, mr], [n, l3, l3 / 2, l2, nr], true)
     } else {
         (
             [m, m, m, m, mr],
@@ -231,7 +231,7 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
         let packed_lhs = Cell(packed_lhs.as_mut_ptr());
         let packed_rhs = Cell(packed_rhs.as_mut_ptr());
         let bencher = Cell(bencher);
-        syncthreads::with_lock(rayon::current_num_threads(), || {
+        spindle::with_lock(rayon::current_num_threads(), || {
             { bencher }.0.bench(|| unsafe {
                 // A and B in this benchmark are column major
                 // row stride is    sizeof(T) * row_distance
