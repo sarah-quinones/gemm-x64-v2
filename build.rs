@@ -929,7 +929,8 @@ impl Target {
         let reg = simd.reg();
 
         let instr = match simd {
-            Simd::_32 | Simd::_64 => format!("vmovs{ty.suffix()}"),
+            Simd::_32 => format!("vmovss"),
+            Simd::_64 => format!("vmovsd"),
             _ => {
                 if mask.is_none() || simd.dedicated_mask() {
                     format!("vmovup{self.ty.suffix()}")
@@ -956,7 +957,8 @@ impl Target {
         let reg = simd.reg();
 
         let instr = match simd {
-            Simd::_32 | Simd::_64 => format!("vmovs{ty.suffix()}"),
+            Simd::_32 => format!("vmovss"),
+            Simd::_64 => format!("vmovsd"),
             _ => {
                 if mask.is_none() || simd.dedicated_mask() {
                     format!("vmovup{self.ty.suffix()}")
@@ -1183,29 +1185,26 @@ impl Target {
         format!("{instr} {self.simd.reg()}{dst}, {src}")
     }
 
-    fn transpose(self, n_regs: usize) -> (String, bool) {
+    fn transpose(self, n_regs: usize) -> (String, usize, bool) {
         if n_regs == 1 {
-            return (String::new(), false);
+            return (String::new(), 0, false);
         }
 
         let ctx = Ctx::new();
         setup!(ctx, self);
-        let t = self.simd.num_regs() as usize - 1;
+        let mut t = self.simd.num_regs() as usize - 1;
 
         let unpacklo32 = "vunpcklps";
         let unpackhi32 = "vunpckhps";
         let unpacklo64 = "vunpcklpd";
         let unpackhi64 = "vunpckhpd";
-        let permute2x128 = if self.simd.num_regs() <= 16 {
-            "vperm2f128"
-        } else {
-            "vshuff64x2"
-        };
+        let permute2x128 = "vperm2f128";
         let shuffle64x2 = "vshuff64x2";
 
         let in_t = match self.ty {
             Ty::F32 => match n_regs {
                 2 => {
+                    t = 15;
                     let r = |i: usize| format!("xmm{i}");
                     // 128 bit register, want to get low and high 64 bits
                     asm!("{unpacklo32} {r(t)}, {r(0)}, {r(1)}");
@@ -1214,6 +1213,7 @@ impl Target {
                     false
                 }
                 4 => {
+                    t = 15;
                     let r = |i: usize| format!("xmm{i}");
                     let t = |i: usize| format!("xmm{t - i}");
 
@@ -1226,16 +1226,17 @@ impl Target {
                         asm!("{unpackhi32} {t1}, {r0}, {r1}");
                     }
                     for i in 0..2 {
-                        let t0 = t(i);
+                        let r0 = r(2 * i + 0);
+                        let r1 = r(2 * i + 1);
+                        let t0 = t(i + 0);
                         let t1 = t(i + 2);
-                        let r0 = r(i);
-                        let r1 = r(i + 2);
                         asm!("{unpacklo64} {r0}, {t0}, {t1}");
                         asm!("{unpackhi64} {r1}, {t0}, {t1}");
                     }
                     false
                 }
                 8 => {
+                    t = 15;
                     let r = |i: usize| format!("ymm{i}");
                     let t = |i: usize| format!("ymm{t - i}");
 
@@ -1249,10 +1250,10 @@ impl Target {
                     }
                     for j in 0..2 {
                         for i in 0..2 {
-                            let t0 = t(4 * j + 2 * i + 0);
-                            let t1 = t(4 * j + 2 * i + 1);
-                            let r0 = r(4 * j + i + 0);
-                            let r1 = r(4 * j + i + 2);
+                            let r0 = r(4 * j + 2 * i + 0);
+                            let r1 = r(4 * j + 2 * i + 1);
+                            let t0 = t(4 * j + i + 0);
+                            let t1 = t(4 * j + i + 2);
                             asm!("{unpacklo64} {r0}, {t0}, {t1}");
                             asm!("{unpackhi64} {r1}, {t0}, {t1}");
                         }
@@ -1310,8 +1311,8 @@ impl Target {
                         for i in 0..4 {
                             let t0 = t(j + 2 * i + 0);
                             let t1 = t(j + 2 * i + 8);
-                            let r0 = r(j + 2 * i + 0);
-                            let r1 = r(j + 2 * i + 8);
+                            let r0 = r(4 * j + i + 0);
+                            let r1 = r(4 * j + i + 8);
 
                             asm!("{shuffle64x2} {r0}, {t0}, {t1}, {idx[0]}");
                             asm!("{shuffle64x2} {r1}, {t0}, {t1}, {idx[1]}");
@@ -1324,6 +1325,7 @@ impl Target {
             },
             Ty::F64 | Ty::C32 => match n_regs {
                 2 => {
+                    t = 15;
                     let r = |i: usize| format!("xmm{i}");
                     let t = |i: usize| format!("xmm{t - i}");
 
@@ -1336,6 +1338,7 @@ impl Target {
                     true
                 }
                 4 => {
+                    t = 15;
                     let r = |i: usize| format!("ymm{i}");
                     let t = |i: usize| format!("ymm{t - i}");
 
@@ -1372,13 +1375,6 @@ impl Target {
                         asm!("{unpackhi64} {t1}, {r0}, {r1}");
                     }
 
-                    // tau:
-                    //  t0  t2  t3  t1
-                    //
-                    // a00 a02 a03 a01
-                    //   0 a12 a13   0
-                    //   0   0 a23   0
-
                     let idx = [0b10001000, 0b11011101];
                     for j in 0..2 {
                         for i in 0..2 {
@@ -1393,8 +1389,8 @@ impl Target {
 
                     for j in 0..2 {
                         for i in 0..2 {
-                            let t0 = t(j + 2 * i + 0);
-                            let t1 = t(j + 2 * i + 4);
+                            let t0 = t(2 * j + i + 0);
+                            let t1 = t(2 * j + i + 4);
                             let r0 = r(j + 2 * i + 0);
                             let r1 = r(j + 2 * i + 4);
                             asm!("{shuffle64x2} {t0}, {r0}, {r1}, {idx[0]}");
@@ -1408,6 +1404,7 @@ impl Target {
             },
             Ty::C64 => match n_regs {
                 2 => {
+                    t = 15;
                     let r = |i: usize| format!("ymm{i}");
                     let t = |i: usize| format!("ymm{t - i}");
 
@@ -1454,7 +1451,7 @@ impl Target {
             },
         };
 
-        (ctx.code.borrow().clone(), in_t)
+        (ctx.code.borrow().clone(), t, in_t)
     }
 
     fn pack_row_major(self, m: isize) -> (String, String) {
@@ -1476,101 +1473,129 @@ impl Target {
         ctx[nrows].set(true);
         ctx[info].set(true);
 
-        func!("{prefix} {suffix}");
+        let main = {
+            func!("{prefix} {suffix}");
 
-        {
-            alloca!(src);
-            alloca!(dst);
-            reg!(src_rs);
-            reg!(depth);
-            reg!(depth_down);
+            {
+                alloca!(src);
+                alloca!(dst);
+                reg!(src_rs);
+                reg!(depth);
+                reg!(depth_down);
 
-            mov!(src_rs, [info + INFO_LHS_RS]);
-            mov!(depth, [info + INFO_DEPTH]);
+                mov!(src_rs, [info + INFO_LHS_RS]);
+                mov!(depth, [info + INFO_DEPTH]);
 
-            let min_nrows = (m - 1) * self.len();
-            let dst_cs = simd.sizeof() * m;
+                let min_nrows = (m - 1) * self.len();
+                let dst_cs = simd.sizeof() * m;
 
-            for j in 0..simd.num_regs() {
-                vxor!(zmm(j), zmm(j), zmm(j));
-            }
+                for j in 0..simd.num_regs() {
+                    vxor!(zmm(j), zmm(j), zmm(j));
+                }
 
-            let mut len = self.len();
+                let mut len = self.len();
 
-            while len >= 1 {
-                label!({
-                    let packing;
-                });
-
-                assert!(len <= 16);
-
-                mov!(depth_down, depth);
-                and!(depth_down, -len as i8);
-                sub!(depth, depth_down);
-
-                test!(depth_down, depth_down);
-
-                label!(packing = _);
-                {
+                while len >= 1 {
                     label!({
-                        let end;
+                        let loop_begin;
+                        let loop_end;
                     });
 
-                    alloca!(src);
-                    alloca!(nrows);
+                    assert!(len <= 16);
 
-                    for i in 0..min_nrows / len {
-                        for j in 0..len {
-                            vmov!(zmm(j), [src]);
-                            add!(src, src_rs);
+                    let target = Target {
+                        ty,
+                        simd: match len * ty.sizeof() * 8 {
+                            512 => Simd::_512,
+                            256 => Simd::_256,
+                            128 => Simd::_128,
+                            64 => Simd::_64,
+                            32 => Simd::_32,
+                            _ => unreachable!(),
+                        },
+                    };
+
+                    mov!(depth_down, depth);
+                    and!(depth_down, -len as i8);
+                    sub!(depth, depth_down);
+
+                    test!(depth_down, depth_down);
+                    jz!(loop_end);
+                    label!(loop_begin = _);
+                    {
+                        alloca!(src);
+                        alloca!(nrows);
+
+                        for i in 0..min_nrows / len {
+                            for j in 0..len {
+                                asm!("{target.vload(j, Addr::from(src))}");
+                                add!(src, src_rs);
+                            }
+
+                            let (c, t, in_t) = self.transpose(len as _);
+                            *ctx.code.borrow_mut() += &c;
+
+                            for j in 0..len {
+                                asm!(
+                                    "{
+                                        target.vstore(
+                                            Addr::from(dst + (i * len * ty.sizeof() + j * dst_cs)),
+                                            if in_t { t as isize - j } else { j },
+                                        )
+                                    }"
+                                );
+                            }
                         }
+                        let mut i = min_nrows / len;
+                        while i < m * self.len() / len {
+                            label!({
+                                let end;
+                            });
 
-                        let (c, in_t) = self.transpose(len as _);
-                        *ctx.code.borrow_mut() += &c;
+                            for j in 0..len {
+                                cmp!(nrows, i * len + j);
+                                jz!(end);
 
-                        for j in 0..len {
-                            vmov!(
-                                [dst + (i * simd.sizeof() + j * dst_cs)],
-                                zmm(if in_t { simd.num_regs() - 1 - j } else { j })
-                            );
+                                asm!("{target.vload(j, Addr::from(src))}");
+                                add!(src, src_rs);
+                            }
+                            label!(end = _);
+
+                            let (c, t, in_t) = self.transpose(len as _);
+                            *ctx.code.borrow_mut() += &c;
+
+                            for j in 0..len {
+                                asm!(
+                                    "{
+                                        target.vstore(
+                                            Addr::from(dst + (i * len * ty.sizeof() + j * dst_cs)),
+                                            if in_t { t as isize - j } else { j },
+                                        )
+                                    }"
+                                );
+                            }
+
+                            i += 1;
                         }
                     }
-                    let i = min_nrows / len;
-                    for j in 0..len {
-                        vmov!(zmm(j), [src]);
-                        add!(src, src_rs);
+                    add!(src, len * ty.sizeof());
+                    add!(dst, len * dst_cs);
 
-                        cmp!(nrows, i * len + j);
-                        jz!(end);
+                    if len == 1 {
+                        dec!(depth_down);
+                    } else {
+                        sub!(depth_down, len);
                     }
-                    label!(end = _);
+                    jnz!(loop_begin);
+                    label!(loop_end = _);
 
-                    let (c, in_t) = self.transpose(len as _);
-                    *ctx.code.borrow_mut() += &c;
-
-                    for j in 0..len {
-                        vmov!(
-                            [dst + (i * simd.sizeof() + j * dst_cs)],
-                            zmm(if in_t { simd.num_regs() - 1 - j } else { j })
-                        );
-                    }
-
-                    for j in 0..len {
-                        vmov!([dst + (i * simd.sizeof() + j * dst_cs)], zmm(j));
-                    }
+                    len /= 2;
                 }
-                if len == 1 {
-                    dec!(depth_down);
-                } else {
-                    sub!(depth_down, len);
-                }
-                jnz!(packing);
-
-                len /= 2;
             }
-        }
+            name!().clone()
+        };
 
-        (name!().clone(), ctx.code.borrow().clone())
+        (main, ctx.code.borrow().clone())
     }
 
     fn microkernel(self, m: isize, n: isize) -> (String, String) {
@@ -2548,6 +2573,17 @@ fn main() -> Result {
             (&f32_simd64, Ty::F32, "64"),
             (&c32_simd64, Ty::C32, "64"),
             (&f64_simd64, Ty::F64, "64"),
+            (&b32_simd512, Ty::F32, "pack_512"),
+            (&b64_simd512, Ty::F64, "pack_512"),
+            (&b128_simd512, Ty::C64, "pack_512"),
+            (&b32_simd256, Ty::F32, "pack_256"),
+            (&b64_simd256, Ty::F64, "pack_256"),
+            (&b128_simd256, Ty::C64, "pack_256"),
+            (&b32_simd128, Ty::F32, "pack_128"),
+            (&b64_simd128, Ty::F64, "pack_128"),
+            (&b128_simd128, Ty::C64, "pack_128"),
+            (&b32_simd64, Ty::F32, "pack_64"),
+            (&b64_simd64, Ty::F64, "pack_64"),
         ] {
             for (i, name) in names.iter().enumerate() {
                 code += &format!(

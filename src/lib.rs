@@ -1714,3 +1714,160 @@ mod tests_c32 {
         }
     }
 }
+
+#[cfg(test)]
+mod transpose_tests {
+    use super::*;
+    use aligned_vec::avec;
+    use rand::prelude::*;
+
+    #[test]
+    fn test_b128() {
+        let rng = &mut StdRng::seed_from_u64(0);
+
+        for m in 1..=24 {
+            let n = 127;
+
+            let src = &mut *avec![0u128; m * n];
+            let dst = &mut *avec![0u128; m.next_multiple_of(8) * n];
+
+            rng.fill(src);
+            rng.fill(dst);
+
+            let ptr = C64_SIMDpack_512[(24 - m) / 4];
+            let info = MicrokernelInfo {
+                flags: 0,
+                depth: n,
+                lhs_rs: (n * size_of::<u128>()) as isize,
+                lhs_cs: size_of::<u128>() as isize,
+                rhs_rs: 0,
+                rhs_cs: 0,
+                alpha: null(),
+                ptr: null_mut(),
+                rs: 0,
+                cs: 0,
+                row_idx: null(),
+                col_idx: null(),
+            };
+
+            unsafe {
+                core::arch::asm! {"
+                call r10
+                ",
+                    in("r10") ptr,
+                    in("rax") src.as_ptr(),
+                    in("r15") dst.as_mut_ptr(),
+                    in("r8") m,
+                    in("rsi") &info,
+                };
+            }
+
+            for j in 0..n {
+                for i in 0..m {
+                    assert_eq!(src[i * n + j], dst[i + m.next_multiple_of(4) * j]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_b64() {
+        let rng = &mut StdRng::seed_from_u64(0);
+
+        for m in 1..=48 {
+            let n = 127;
+
+            let src = &mut *avec![0u64; m * n];
+            let dst = &mut *avec![0u64; m.next_multiple_of(8) * n];
+
+            rng.fill(src);
+            rng.fill(dst);
+
+            let ptr = F64_SIMDpack_512[(48 - m) / 8];
+            let info = MicrokernelInfo {
+                flags: 0,
+                depth: n,
+                lhs_rs: (n * size_of::<u64>()) as isize,
+                lhs_cs: size_of::<u64>() as isize,
+                rhs_rs: 0,
+                rhs_cs: 0,
+                alpha: null(),
+                ptr: null_mut(),
+                rs: 0,
+                cs: 0,
+                row_idx: null(),
+                col_idx: null(),
+            };
+
+            unsafe {
+                core::arch::asm! {"
+                call r10
+                ",
+                    in("r10") ptr,
+                    in("rax") src.as_ptr(),
+                    in("r15") dst.as_mut_ptr(),
+                    in("r8") m,
+                    in("rsi") &info,
+                };
+            }
+
+            for j in 0..n {
+                for i in 0..m {
+                    assert_eq!(src[i * n + j], dst[i + m.next_multiple_of(8) * j]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_b32() {
+        let rng = &mut StdRng::seed_from_u64(0);
+
+        for m in 1..=96 {
+            let n = 127;
+
+            // let m = 2;
+            // let n = 2;
+
+            let src = &mut *avec![0u32; m * n];
+            let dst = &mut *avec![0u32; m.next_multiple_of(16) * n];
+
+            rng.fill(src);
+            rng.fill(dst);
+
+            let ptr = F32_SIMDpack_512[(96 - m) / 16];
+            let info = MicrokernelInfo {
+                flags: 0,
+                depth: n,
+                lhs_rs: (n * size_of::<f32>()) as isize,
+                lhs_cs: size_of::<f32>() as isize,
+                rhs_rs: 0,
+                rhs_cs: 0,
+                alpha: null(),
+                ptr: null_mut(),
+                rs: 0,
+                cs: 0,
+                row_idx: null(),
+                col_idx: null(),
+            };
+
+            unsafe {
+                core::arch::asm! {"
+                call r10
+                ",
+                    in("r10") ptr,
+                    in("rax") src.as_ptr(),
+                    in("r15") dst.as_mut_ptr(),
+                    in("r8") m,
+                    in("rsi") &info,
+                };
+            }
+
+            for j in 0..n {
+                for i in 0..m {
+                    assert_eq!(src[i * n + j], dst[i + m.next_multiple_of(16) * j]);
+                }
+            }
+        }
+    }
+}
