@@ -17,8 +17,8 @@ const INFO_ALPHA: isize = 6 * WORD;
 const INFO_PTR: isize = 7 * WORD;
 const INFO_RS: isize = 8 * WORD;
 const INFO_CS: isize = 9 * WORD;
-const INFO_ROW_IDX: isize = 8 * WORD;
-const INFO_COL_IDX: isize = 9 * WORD;
+const INFO_ROW_IDX: isize = 10 * WORD;
+const INFO_COL_IDX: isize = 11 * WORD;
 const INFO_DIAG_PTR: isize = 12 * WORD;
 const INFO_DIAG_STRIDE: isize = 13 * WORD;
 
@@ -171,6 +171,14 @@ macro_rules! vadd {
     (zmm($dst: expr), zmm($lhs: expr), zmm($rhs: expr) $(,)?) => {{
         match ($dst, $lhs, $rhs) {
             (dst, lhs, rhs) => asm!("{target!().vadd(dst, lhs, rhs)}"),
+        }
+    }};
+}
+
+macro_rules! vadds {
+    (xmm($dst: expr), xmm($lhs: expr), xmm($rhs: expr) $(,)?) => {{
+        match ($dst, $lhs, $rhs) {
+            (dst, lhs, rhs) => asm!("{target!().vadds(dst, lhs, rhs)}"),
         }
     }};
 }
@@ -365,6 +373,19 @@ macro_rules! mov {
     }};
 }
 
+macro_rules! movzx {
+    ($dst: expr, [$src: expr] $(,)?) => {{
+        match ($dst, $src) {
+            (dst, src) if dst >= r8 => asm!("mov {dst}d, dword ptr { Addr::from(src) }"),
+            (dst, src) => {
+                let dst = dst.to_string();
+                let dst = dst.replace('r', "e");
+                asm!("mov {dst}, dword ptr { Addr::from(src) }")
+            }
+        }
+    }};
+}
+
 macro_rules! cmp {
     ([$lhs: expr], $rhs: expr $(,)?) => {{
         match ($lhs, $rhs) {
@@ -467,6 +488,14 @@ macro_rules! dec {
     }};
 }
 
+macro_rules! inc {
+    ($inout: expr $(,)?) => {{
+        match $inout {
+            inout => asm!("inc {inout}"),
+        }
+    }};
+}
+
 macro_rules! sub {
     ($lhs: expr, $rhs: expr $(,)?) => {{
         match ($lhs, $rhs) {
@@ -547,6 +576,20 @@ macro_rules! jnl {
     };
 }
 
+macro_rules! jg {
+    ($label: ident) => {
+        let name = label!($label);
+        asm!("jg {name}");
+    };
+}
+
+macro_rules! jng {
+    ($label: ident) => {
+        let name = label!($label);
+        asm!("jng {name}");
+    };
+}
+
 macro_rules! jz {
     ($label: ident) => {
         let name = label!($label);
@@ -580,7 +623,7 @@ macro_rules! abort {
     };
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Reg {
     rax = 0,
     rbx = 1,
@@ -1190,6 +1233,16 @@ impl Target {
         format!("vadd{self.scalar_suffix()}{ty.suffix()} {reg}{dst}, {reg}{lhs}, {reg}{rhs}")
     }
 
+    fn vadds(self, dst: isize, lhs: isize, rhs: isize) -> String {
+        let Self { ty, simd: _ } = self;
+        let reg = "xmm";
+        if self.is_cplx() {
+            format!("vaddp{ty.suffix()} {reg}{dst}, {reg}{lhs}, {reg}{rhs}")
+        } else {
+            format!("vadds{ty.suffix()} {reg}{dst}, {reg}{lhs}, {reg}{rhs}")
+        }
+    }
+
     fn vadd_mem(self, dst: isize, lhs: isize, rhs: Addr) -> String {
         let Self { ty, simd } = self;
         let reg = simd.reg();
@@ -1727,6 +1780,7 @@ impl Target {
         let flags_conj_diff = 2;
         let flags_lower = 3;
         let flags_upper = 4;
+        let flags_32bit = 5;
 
         ctx[rsp].set(true);
         ctx[lhs].set(true);
@@ -1848,11 +1902,11 @@ impl Target {
 
                 label!({
                     let colmajor;
-                    let rowmajor;
                     let strided;
                     let load;
                     let mask;
                     let epilogue;
+                    let epilogue_any;
                     let epilogue_store;
                     let epilogue_mask;
                     let epilogue_store_overwrite;
@@ -1870,18 +1924,13 @@ impl Target {
 
                 cmp!(lhs_rs, ty.sizeof());
                 jz!(colmajor);
-                cmp!(lhs_cs, ty.sizeof());
-                jz!(rowmajor);
 
                 label!(strided = _);
                 {
                     abort!();
+                    jmp!(end);
                 }
 
-                label!(rowmajor = _);
-                {
-                    abort!();
-                }
                 label!(colmajor = _);
                 {
                     cmp!(nrows, m * self.len());
@@ -1895,6 +1944,7 @@ impl Target {
                         jnz!(mask);
                     } else {
                         abort!();
+                        jmp!(end);
                     }
                 }
 
@@ -1986,6 +2036,101 @@ impl Target {
                 }
                 label!(epilogue = _);
 
+                {
+                    let alpha_ptr = lhs;
+                    let alpha_re = m * n;
+                    let alpha_im = m * n + 1;
+                    let tmp = m * n + 3;
+
+                    if self.is_cplx() {
+                        vmov!(
+                            zmm(alpha_re),
+                            [rip + &format!("{*PREFIX} gemm.microkernel.{ty}.flip.re.data")]
+                        );
+                        vmov!(
+                            zmm(alpha_im),
+                            [rip + &format!("{*PREFIX} gemm.microkernel.{ty}.flip.im.data")]
+                        );
+                        label!({
+                            let xor;
+                            let conj_lhs;
+                            let conj_lhs_conj_rhs;
+                            let conj_lhs_no_conj_rhs;
+                            let conj_lhs_no_conj_rhs;
+                            let no_conj_lhs;
+                            let no_conj_lhs_conj_rhs;
+                            let no_conj_lhs_no_conj_rhs;
+                            let no_conj_lhs_no_conj_rhs;
+                        });
+                        bt!([info + INFO_FLAGS], flags_conj_lhs);
+                        jnc!(no_conj_lhs);
+
+                        label!(conj_lhs = _);
+                        {
+                            bt!([info + INFO_FLAGS], flags_conj_diff);
+                            jc!(conj_lhs_no_conj_rhs);
+
+                            label!(conj_lhs_conj_rhs = _);
+                            {
+                                vxor!(zmm(alpha_re), zmm(alpha_re), zmm(alpha_im));
+                                jmp!(xor);
+                            }
+                            label!(conj_lhs_no_conj_rhs = _);
+                            {
+                                vxor!(zmm(alpha_re), zmm(alpha_re), zmm(alpha_re));
+                                jmp!(xor);
+                            }
+                        }
+
+                        label!(no_conj_lhs = _);
+                        {
+                            bt!([info + INFO_FLAGS], flags_conj_diff);
+                            jnc!(no_conj_lhs_no_conj_rhs);
+
+                            label!(no_conj_lhs_conj_rhs = _);
+                            {
+                                vmov!(zmm(alpha_re), zmm(alpha_im));
+                                jmp!(xor);
+                            }
+                            label!(no_conj_lhs_no_conj_rhs = _);
+                            {}
+                        }
+                        label!(xor = _);
+                        for i in 0..m * n {
+                            vxor!(zmm(i), zmm(i), zmm(alpha_re));
+                        }
+                    }
+
+                    mov!(alpha_ptr, [info + INFO_ALPHA]);
+                    vbroadcast!(zmm(alpha_re), [alpha_ptr]);
+                    if self.is_cplx() {
+                        vbroadcast!(zmm(alpha_im), [alpha_ptr + ty.sizeof() / 2]);
+                    }
+
+                    for j in 0..n {
+                        for i in 0..m {
+                            let src = m * j + i;
+
+                            if self.is_cplx() {
+                                vswap!(zmm(src));
+                                vmul!(zmm(tmp), zmm(src), zmm(alpha_im));
+                                vswap!(zmm(src));
+                                vfma231!(zmm(tmp), zmm(src), zmm(alpha_re));
+                                vmov!(zmm(src), zmm(tmp));
+                            } else {
+                                vmul!(zmm(src), zmm(src), zmm(alpha_re));
+                            };
+                        }
+                    }
+                }
+
+                cmp!([info + INFO_ROW_IDX], 0);
+                jnz!(epilogue_any);
+                cmp!([info + INFO_COL_IDX], 0);
+                jnz!(epilogue_any);
+                cmp!([info + INFO_RS], ty.sizeof());
+                jnz!(epilogue_any);
+
                 bt!([info + INFO_FLAGS], flags_lower);
                 jc!(epilogue_lower);
 
@@ -2009,7 +2154,8 @@ impl Target {
                         call!("{prefix}.epilogue.mask.overwrite {suffix}");
                         jmp!(end);
                     } else {
-                        abort!();
+                        call!("{prefix}.epilogue.any {suffix}");
+                        jmp!(end);
                     }
                 }
 
@@ -2055,7 +2201,11 @@ impl Target {
                     jmp!(end);
                 }
 
-                abort!();
+                label!(epilogue_any = _);
+                {
+                    call!("{prefix}.epilogue.any {suffix}");
+                    jmp!(end);
+                }
 
                 label!(end = _);
 
@@ -2421,9 +2571,272 @@ impl Target {
             ctx[rhs_rs].set(false);
             ctx[lhs_cs].set(false);
             ctx[lhs_rs].set(false);
+            ctx[lhs].set(false);
+            ctx[packed_lhs].set(false);
+            ctx[rhs].set(false);
+            ctx[packed_rhs].set(false);
 
             main
         };
+
+        {
+            func!("{prefix}.epilogue.any {suffix}");
+
+            reg!(stack);
+            reg!(tmp);
+            reg!(ptr);
+            reg!(rs);
+            reg!(cs);
+            reg!(row);
+            reg!(col);
+            reg!(row_idx);
+            reg!(col_idx);
+            reg!(row_min);
+            let row_max = mask_ptr;
+
+            let vtmp1 = m * n + 2;
+            let vtmp2 = m * n + 3;
+
+            {
+                label!({
+                    let rowmajor;
+                    let colmajor;
+                    let end;
+                    let finale;
+                });
+
+                mov!(rs, [info + INFO_RS]);
+                mov!(cs, [info + INFO_CS]);
+                mov!(row_idx, [info + INFO_ROW_IDX]);
+                mov!(col_idx, [info + INFO_COL_IDX]);
+
+                for j in 0..n {
+                    mov!(stack, rsp);
+                    and!(rsp, -128);
+                    sub!(rsp, 512);
+
+                    for i in 0..m {
+                        vmov!([rsp + i * simd.sizeof()], zmm(m * j + i));
+                    }
+
+                    mov!(col, [position + WORD]);
+                    add!(col, j);
+
+                    mov!(row_min, [position]);
+                    mov!(row, [position]);
+                    cmp!(row, col);
+
+                    mov!(row_max, m * self.len());
+                    cmp!(nrows, row_max);
+                    cmovc!(row_max, nrows);
+                    add!(row_max, [position]);
+
+                    {
+                        label!({
+                            let cont;
+                        });
+
+                        bt!([info + INFO_FLAGS], flags_lower);
+                        jnc!(cont);
+                        cmp!(row_min, col);
+                        jg!(cont);
+                        sub!(row_min, col);
+                        neg!(row_min);
+                        if ty.sizeof() <= 8 {
+                            lea!(rsp, [rsp + ty.sizeof() * row_min]);
+                        } else {
+                            assert_eq!(ty.sizeof(), 16);
+                            lea!(rsp, [rsp + 8 * row_min]);
+                            lea!(rsp, [rsp + 8 * row_min]);
+                        }
+
+                        mov!(row_min, col);
+
+                        label!(cont = _);
+                    }
+                    {
+                        label!({
+                            let cont;
+                        });
+
+                        inc!(col);
+
+                        bt!([info + INFO_FLAGS], flags_upper);
+                        jnc!(cont);
+
+                        cmp!(row_max, col);
+                        jl!(cont);
+                        mov!(row_max, col);
+
+                        label!(cont = _);
+
+                        dec!(col);
+                    }
+
+                    {
+                        label!({
+                            let cont;
+                            let cont32;
+                        });
+                        test!(col_idx, col_idx);
+                        jz!(cont);
+
+                        bt!([info + INFO_FLAGS], flags_32bit);
+                        jc!(cont32);
+
+                        {
+                            mov!(col, [col_idx + WORD * col]);
+                            jmp!(cont);
+                        }
+                        label!(cont32 = _);
+
+                        {
+                            movzx!(col, [col_idx + 4 * col]);
+                        }
+                        label!(cont = _);
+                    }
+                    imul!(col, cs);
+                    mov!(ptr, [info + INFO_PTR]);
+                    add!(ptr, col);
+
+                    {
+                        label!({
+                            let cont;
+                            let end;
+                        });
+
+                        test!(row_idx, row_idx);
+                        jz!(cont);
+
+                        {
+                            label!({
+                                let begin;
+                                let skip_add;
+                                let cont32;
+                                let cont64;
+                            });
+                            cmp!(row_min, row_max);
+                            jnl!(end);
+
+                            mov!(row, row_min);
+
+                            label!(begin = _);
+                            {
+                                bt!([info + INFO_FLAGS], flags_32bit);
+                                jc!(cont32);
+
+                                {
+                                    mov!(tmp, [row_idx + WORD * row]);
+                                    jmp!(cont64);
+                                }
+                                label!(cont32 = _);
+
+                                {
+                                    movzx!(tmp, [row_idx + 4 * row]);
+                                }
+                                label!(cont64 = _);
+
+                                imul!(tmp, rs);
+                                lea!(tmp, [ptr + 1 * tmp]);
+
+                                vmovs!(xmm(vtmp1), [rsp]);
+                                add!(rsp, ty.sizeof());
+
+                                bt!([info + INFO_FLAGS], flags_accum);
+                                jnc!(skip_add);
+                                {
+                                    vmovs!(xmm(vtmp2), [tmp]);
+                                    vadds!(xmm(vtmp1), xmm(vtmp1), xmm(vtmp2));
+                                }
+                                label!(skip_add = _);
+
+                                vmovs!([tmp], xmm(vtmp1));
+
+                                inc!(row);
+                                cmp!(row, row_max);
+                                jl!(begin);
+                            }
+
+                            jmp!(end);
+                        }
+
+                        label!(cont = _);
+                        {
+                            label!({
+                                let begin;
+                                let skip_add;
+                            });
+                            cmp!(row_min, row_max);
+                            jnl!(end);
+
+                            mov!(row, row_min);
+
+                            label!(begin = _);
+                            {
+                                mov!(tmp, row);
+                                imul!(tmp, rs);
+                                lea!(tmp, [ptr + 1 * tmp]);
+
+                                vmovs!(xmm(vtmp1), [rsp]);
+                                add!(rsp, ty.sizeof());
+
+                                bt!([info + INFO_FLAGS], flags_accum);
+                                jnc!(skip_add);
+                                {
+                                    vmovs!(xmm(vtmp2), [tmp]);
+                                    vadds!(xmm(vtmp1), xmm(vtmp1), xmm(vtmp2));
+                                }
+                                label!(skip_add = _);
+
+                                vmovs!([tmp], xmm(vtmp1));
+
+                                inc!(row);
+                                cmp!(row, row_max);
+                                jl!(begin);
+                            }
+
+                            jmp!(end);
+                        }
+
+                        label!(end = _);
+                    }
+                    mov!(rsp, stack);
+                }
+
+                label!(finale = _);
+                let tmp = ptr;
+                mov!(tmp, m * self.len());
+                cmp!(nrows, tmp);
+                cmovc!(tmp, nrows);
+
+                bt!([rsi], 63);
+                jc!(rowmajor);
+
+                label!(colmajor = _);
+                {
+                    add!([position], tmp);
+                    sub!(nrows, tmp);
+
+                    jnz!(end);
+                    sub!(ncols, n);
+                    add!([position + WORD], n);
+                }
+                jmp!(end);
+
+                label!(rowmajor = _);
+                {
+                    add!([position + WORD], n);
+                    sub!(ncols, n);
+
+                    jnz!(end);
+
+                    add!([position], tmp);
+                    sub!(nrows, tmp);
+                }
+
+                label!(end = _);
+            }
+        }
 
         let __triangle__ = [".lower", ".upper", ""];
 
@@ -2616,78 +3029,9 @@ impl Target {
                             neg!(diff);
                         }
 
-                        let alpha_ptr = col;
-
-                        let alpha_re = m * n;
-                        let alpha_im = m * n + 1;
-                        let mask_ = if simd.dedicated_mask() { 1 } else { m * n + 2 };
-                        let mask2_ = if simd.dedicated_mask() { 2 } else { alpha_im };
-                        let tmp = m * n + 3;
-
-                        if self.is_cplx() {
-                            vmov!(
-                                zmm(alpha_re),
-                                [rip + &format!("{*PREFIX} gemm.microkernel.{ty}.flip.re.data")]
-                            );
-                            vmov!(
-                                zmm(alpha_im),
-                                [rip + &format!("{*PREFIX} gemm.microkernel.{ty}.flip.im.data")]
-                            );
-                            label!({
-                                let xor;
-                                let conj_lhs;
-                                let conj_lhs_conj_rhs;
-                                let conj_lhs_no_conj_rhs;
-                                let conj_lhs_no_conj_rhs;
-                                let no_conj_lhs;
-                                let no_conj_lhs_conj_rhs;
-                                let no_conj_lhs_no_conj_rhs;
-                                let no_conj_lhs_no_conj_rhs;
-                            });
-                            bt!([info + INFO_FLAGS], flags_conj_lhs);
-                            jnc!(no_conj_lhs);
-
-                            label!(conj_lhs = _);
-                            {
-                                bt!([info + INFO_FLAGS], flags_conj_diff);
-                                jc!(conj_lhs_no_conj_rhs);
-
-                                label!(conj_lhs_conj_rhs = _);
-                                {
-                                    vxor!(zmm(alpha_re), zmm(alpha_re), zmm(alpha_im));
-                                    jmp!(xor);
-                                }
-                                label!(conj_lhs_no_conj_rhs = _);
-                                {
-                                    vxor!(zmm(alpha_re), zmm(alpha_re), zmm(alpha_re));
-                                    jmp!(xor);
-                                }
-                            }
-
-                            label!(no_conj_lhs = _);
-                            {
-                                bt!([info + INFO_FLAGS], flags_conj_diff);
-                                jnc!(no_conj_lhs_no_conj_rhs);
-
-                                label!(no_conj_lhs_conj_rhs = _);
-                                {
-                                    vmov!(zmm(alpha_re), zmm(alpha_im));
-                                    jmp!(xor);
-                                }
-                                label!(no_conj_lhs_no_conj_rhs = _);
-                                {}
-                            }
-                            label!(xor = _);
-                            for i in 0..m * n {
-                                vxor!(zmm(i), zmm(i), zmm(alpha_re));
-                            }
-                        }
-
-                        mov!(alpha_ptr, [info + INFO_ALPHA]);
-                        vbroadcast!(zmm(alpha_re), [alpha_ptr]);
-                        if self.is_cplx() {
-                            vbroadcast!(zmm(alpha_im), [alpha_ptr + ty.sizeof() / 2]);
-                        }
+                        let mask_ = if simd.dedicated_mask() { 1 } else { m * n };
+                        let mask2_ = if simd.dedicated_mask() { 2 } else { m * n + 1 };
+                        let tmp = m * n + 2;
 
                         if mask {
                             label!({
@@ -2725,32 +3069,11 @@ impl Target {
                         for j in 0..n {
                             for i in 0..m {
                                 let src = m * j + i;
-                                if self.is_cplx() || !add {
-                                    if self.is_cplx() {
-                                        vswap!(zmm(src));
-                                        vmul!(zmm(tmp), zmm(src), zmm(alpha_im));
-                                        vswap!(zmm(src));
-                                        vfma231!(zmm(tmp), zmm(src), zmm(alpha_re));
-                                        vmov!(zmm(src), zmm(tmp));
-                                    } else {
-                                        vmul!(zmm(src), zmm(src), zmm(alpha_re));
-                                    }
-                                };
-                            }
-                        }
-
-                        for j in 0..n {
-                            for i in 0..m {
-                                let src = m * j + i;
                                 let ptr = ptr + simd.sizeof() * i;
 
                                 if (!mask || i + 1 < m) && (triangle == 2 || i > 0) {
                                     if add {
-                                        if self.is_cplx() {
-                                            vadd!(zmm(src), zmm(src), [ptr]);
-                                        } else {
-                                            vfma213!(zmm(src), zmm(alpha_re), [ptr]);
-                                        }
+                                        vadd!(zmm(src), zmm(src), [ptr]);
                                     }
                                     vmov!([ptr], zmm(src));
                                 } else {
@@ -2782,12 +3105,7 @@ impl Target {
 
                                     if add {
                                         vmov!(zmm(tmp)[mask_], [ptr]);
-
-                                        if self.is_cplx() {
-                                            vadd!(zmm(src), zmm(src), zmm(tmp));
-                                        } else {
-                                            vfma213!(zmm(src), zmm(alpha_re), zmm(tmp));
-                                        }
+                                        vadd!(zmm(src), zmm(src), zmm(tmp));
                                     }
                                     vmov!([ptr][mask_], zmm(src));
                                 }
