@@ -114,6 +114,9 @@ pub unsafe fn call_microkernel(
             out("zmm30") _,
             out("zmm31") _,
             out("k1") _,
+            out("k2") _,
+            out("k3") _,
+            out("k4") _,
         }
     }
     (nrows, ncols)
@@ -269,7 +272,7 @@ pub unsafe fn millikernel_colmajor(
     }
 }
 
-pub unsafe fn millikernel_par_colmajor(
+pub unsafe fn millikernel_par(
     thd_id: usize,
     n_threads: usize,
 
@@ -281,11 +284,13 @@ pub unsafe fn millikernel_par_colmajor(
 
     mr: usize,
     nr: usize,
+    sizeof: usize,
 
     mf: usize,
     nf: usize,
 
     microkernel: unsafe extern "C" fn(),
+    pack: unsafe extern "C" fn(),
 
     lhs: *const (),
     packed_lhs: *mut (),
@@ -362,6 +367,13 @@ pub unsafe fn millikernel_par_colmajor(
             }
 
             unsafe {
+                if lhs != packed_lhs && !lhs.is_null() && milli.micro.lhs_cs == sizeof as isize {
+                    pack_row_major(pack, milli, row_chunk, packed_lhs, lhs);
+
+                    lhs = null();
+                    pack_lhs_job[i].store(2, Ordering::Release);
+                }
+
                 call_microkernel(
                     microkernel,
                     lhs,
@@ -388,11 +400,68 @@ pub unsafe fn millikernel_par_colmajor(
     }
 }
 
+unsafe fn pack_row_major(
+    pack: unsafe extern "C" fn(),
+    milli: &MillikernelInfo,
+    row_chunk: usize,
+    packed_lhs: *mut (),
+    lhs: *const (),
+) {
+    unsafe {
+        core::arch::asm! {
+            "call r10",
+            in("r10") pack,
+            in("rax") lhs,
+            in("r15") packed_lhs,
+            in("r8") row_chunk,
+            in("rsi") &milli.micro,
+
+            out("zmm0") _,
+            out("zmm1") _,
+            out("zmm2") _,
+            out("zmm3") _,
+            out("zmm4") _,
+            out("zmm5") _,
+            out("zmm6") _,
+            out("zmm7") _,
+            out("zmm8") _,
+            out("zmm9") _,
+            out("zmm10") _,
+            out("zmm11") _,
+            out("zmm12") _,
+            out("zmm13") _,
+            out("zmm14") _,
+            out("zmm15") _,
+            out("zmm16") _,
+            out("zmm17") _,
+            out("zmm18") _,
+            out("zmm19") _,
+            out("zmm20") _,
+            out("zmm21") _,
+            out("zmm22") _,
+            out("zmm23") _,
+            out("zmm24") _,
+            out("zmm25") _,
+            out("zmm26") _,
+            out("zmm27") _,
+            out("zmm28") _,
+            out("zmm29") _,
+            out("zmm30") _,
+            out("zmm31") _,
+            out("k1") _,
+            out("k2") _,
+            out("k3") _,
+            out("k4") _,
+        };
+    }
+}
+
 pub unsafe trait Millikernel {
     unsafe fn call(
         &mut self,
 
         microkernel: unsafe extern "C" fn(),
+        pack: unsafe extern "C" fn(),
 
         lhs: *const (),
         packed_lhs: *mut (),
@@ -414,6 +483,8 @@ struct MilliPar<'a, 'b> {
     mr: usize,
     nr: usize,
     hyper: usize,
+    sizeof: usize,
+
     microkernel_job: Box<[AtomicU8]>,
     pack_lhs_job: Box<[AtomicU8]>,
     pack_rhs_job: Box<[AtomicU8]>,
@@ -427,6 +498,7 @@ unsafe impl Millikernel for Milli {
         &mut self,
 
         microkernel: unsafe extern "C" fn(),
+        pack: unsafe extern "C" fn(),
 
         lhs: *const (),
         packed_lhs: *mut (),
@@ -470,6 +542,7 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
         &mut self,
 
         microkernel: unsafe extern "C" fn(),
+        pack: unsafe extern "C" fn(),
 
         lhs: *const (),
         packed_lhs: *mut (),
@@ -483,7 +556,7 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
         milli: &MillikernelInfo,
         pos: Position,
     ) {
-        let mut lhs = Cell(lhs);
+        let lhs = Cell(lhs);
         let mut rhs = Cell(rhs);
         let packed_lhs = Cell(packed_lhs);
         let packed_rhs = Cell(packed_rhs);
@@ -519,65 +592,6 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
 
         let mr = self.mr;
         let nr = self.nr;
-
-        if !lhs.0.is_null() && lhs.0 != packed_lhs.0 {
-            let depth = { milli }.0.micro.depth;
-            let n_threads = 2;
-
-            let div = nrows.div_ceil(mr) / n_threads;
-            let rem = nrows.div_ceil(mr) % n_threads;
-
-            if false {
-                spindle::for_each_raw(n_threads, |tid| {
-                    let mut start = tid * div;
-                    if tid <= rem {
-                        start += tid;
-                    } else {
-                        start += rem;
-                    }
-                    let end = start + div + if tid < rem { 1 } else { 0 };
-
-                    for i in start..end {
-                        let row = Ord::min(nrows, i * mr);
-                        let nrows = Ord::min(nrows - row, mr);
-
-                        let n = if mr >= 24 { 8 } else { Ord::min(mr, 4) };
-                        if nrows == 0 {
-                            return;
-                        }
-
-                        let cs = nrows.next_multiple_of(n);
-                        let lhs = Cell(
-                            { lhs }
-                                .0
-                                .wrapping_byte_offset({ milli }.0.lhs_rs * i as isize),
-                        );
-                        let packed_lhs = Cell(
-                            { packed_lhs }
-                                .0
-                                .wrapping_byte_offset({ milli }.0.packed_lhs_rs * i as isize),
-                        );
-
-                        for j in 0..depth {
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    { lhs }
-                                        .0
-                                        .wrapping_byte_offset(j as isize * { milli }.0.micro.lhs_cs)
-                                        as *const f64,
-                                    { packed_lhs }
-                                        .0
-                                        .wrapping_byte_offset((j * cs * size_of::<f64>()) as isize)
-                                        as *mut f64,
-                                    nrows,
-                                );
-                            }
-                        }
-                    }
-                });
-                lhs.0 = null();
-            }
-        }
 
         if !rhs.0.is_null() && rhs.0 != packed_rhs.0 {
             let depth = { milli }.0.micro.depth;
@@ -643,11 +657,7 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
                 }
                 let milli = { milli }.0;
 
-                (if milli.micro.flags >> 63 == 1 {
-                    todo!()
-                } else {
-                    millikernel_par_colmajor
-                })(
+                millikernel_par(
                     tid,
                     n,
                     &self.microkernel_job,
@@ -657,9 +667,11 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
                     self.hyper,
                     self.mr,
                     self.nr,
+                    self.sizeof,
                     mf,
                     nf,
                     microkernel,
+                    pack,
                     { lhs }.0,
                     { packed_lhs }.0,
                     { rhs }.0,
@@ -680,6 +692,8 @@ unsafe fn kernel_imp(
     millikernel: &mut dyn Millikernel,
 
     microkernel: &[unsafe extern "C" fn()],
+    pack: &[unsafe extern "C" fn()],
+
     mr: usize,
     nr: usize,
 
@@ -763,6 +777,7 @@ unsafe fn kernel_imp(
         micro: *info,
     };
     let microkernel = microkernel[nr - 1];
+    let pack = pack[0];
 
     let q = row_chunk.len();
     let row_chunk = &row_chunk[..q - 1];
@@ -807,6 +822,7 @@ unsafe fn kernel_imp(
             unsafe {
                 millikernel.call(
                     microkernel,
+                    pack,
                     lhs,
                     packed_lhs,
                     rhs,
@@ -905,8 +921,11 @@ unsafe fn kernel_imp(
 pub unsafe fn kernel_rayon(
     n_threads: usize,
     microkernel: &[unsafe extern "C" fn()],
+    pack: &[unsafe extern "C" fn()],
+
     mr: usize,
     nr: usize,
+    sizeof: usize,
 
     lhs: *const (),
     packed_lhs: *mut (),
@@ -947,6 +966,7 @@ pub unsafe fn kernel_rayon(
             &mut MilliPar {
                 mr,
                 nr,
+                sizeof,
                 hyper: 1,
                 microkernel_job: (0..c * max_j).map(|_| AtomicU8::new(0)).collect(),
                 pack_lhs_job: (0..max_i).map(|_| AtomicU8::new(0)).collect(),
@@ -956,6 +976,7 @@ pub unsafe fn kernel_rayon(
                 __: &&(),
             },
             microkernel,
+            pack,
             mr,
             nr,
             { lhs }.0,
@@ -981,8 +1002,11 @@ pub unsafe fn kernel_rayon(
 
 pub unsafe fn kernel(
     microkernel: &[unsafe extern "C" fn()],
+    pack: &[unsafe extern "C" fn()],
+
     mr: usize,
     nr: usize,
+    sizeof: usize,
 
     lhs: *const (),
     packed_lhs: *mut (),
@@ -1010,6 +1034,7 @@ pub unsafe fn kernel(
         kernel_imp(
             &mut Milli,
             microkernel,
+            pack,
             mr,
             nr,
             lhs,
@@ -1195,8 +1220,10 @@ mod tests_f64 {
 
                     kernel(
                         &F64_SIMD512x4[..24],
+                        &F64_SIMDpack_512,
                         48,
                         4,
+                        size_of::<f64>(),
                         lhs.as_ptr() as _,
                         if pack_lhs {
                             packed_lhs.as_mut_ptr() as _
@@ -1545,8 +1572,10 @@ mod tests_f32 {
 
                     kernel(
                         &F32_SIMD512x4[..24],
+                        &F32_SIMDpack_512,
                         96,
                         4,
+                        size_of::<f32>(),
                         lhs.as_ptr() as _,
                         if pack_lhs {
                             packed_lhs.as_mut_ptr() as _

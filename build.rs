@@ -1634,6 +1634,17 @@ impl Target {
             func!("{prefix} {suffix}");
 
             {
+                label!({
+                    let good;
+                });
+                if m > 1 {
+                    cmp!(nrows, (m - 1) * self.len() + 1);
+                    jnc!(good);
+                    jmp!("{prefix} [with m = {(m - 1) * self.len()}]");
+                }
+                label!(good = _);
+            }
+            {
                 alloca!(src);
                 alloca!(dst);
                 reg!(src_rs);
