@@ -17,6 +17,10 @@ const INFO_ALPHA: isize = 6 * WORD;
 const INFO_PTR: isize = 7 * WORD;
 const INFO_RS: isize = 8 * WORD;
 const INFO_CS: isize = 9 * WORD;
+const INFO_ROW_IDX: isize = 8 * WORD;
+const INFO_COL_IDX: isize = 9 * WORD;
+const INFO_DIAG_PTR: isize = 12 * WORD;
+const INFO_DIAG_STRIDE: isize = 13 * WORD;
 
 use std::env;
 use std::fmt::Display;
@@ -216,7 +220,21 @@ macro_rules! kmov {
     }};
 }
 
+macro_rules! kand {
+    (k($dst: expr), k($lhs: expr), k($rhs: expr) $(,)?) => {{
+        match ($dst, $lhs, $rhs) {
+            (dst, lhs, rhs) => asm!("{ target!().kand(dst, lhs, rhs) }"),
+        }
+    }};
+}
+
 macro_rules! vmul {
+    (zmm($dst: expr), zmm($lhs: expr), [$rhs: expr] $(,)?) => {{
+        match ($dst, $lhs, $rhs) {
+            (dst, lhs, rhs) => asm!("{target!().vmul_mem(dst, lhs, Addr::from(rhs))}"),
+        }
+    }};
+
     (zmm($dst: expr), zmm($lhs: expr), zmm($rhs: expr) $(,)?) => {
         match ($dst, $lhs, $rhs) {
             (dst, lhs, rhs) => asm!("{target!().vmul(dst, lhs, rhs)}"),
@@ -300,6 +318,11 @@ macro_rules! vmovsr {
 }
 
 macro_rules! alloca {
+    ([$reg: expr]) => {
+        let __reg__ = Addr::from($reg);
+        asm!("push {__reg__}");
+        defer!(asm!("pop {__reg__}"));
+    };
     ($reg: expr) => {
         let __reg__ = $reg;
         asm!("push {__reg__}");
@@ -311,6 +334,13 @@ macro_rules! cmovz {
     ($dst: expr, $src: expr $(,)?) => {{
         match ($dst, $src) {
             (dst, src) => asm!("cmovz {dst}, {src}"),
+        }
+    }};
+}
+macro_rules! cmovc {
+    ($dst: expr, $src: expr $(,)?) => {{
+        match ($dst, $src) {
+            (dst, src) => asm!("cmovc {dst}, {src}"),
         }
     }};
 }
@@ -336,6 +366,12 @@ macro_rules! mov {
 }
 
 macro_rules! cmp {
+    ([$lhs: expr], $rhs: expr $(,)?) => {{
+        match ($lhs, $rhs) {
+            (lhs, rhs) => asm!("cmp qword ptr {Addr::from(lhs)}, {rhs}"),
+        }
+    }};
+
     ($lhs: expr, $rhs: expr $(,)?) => {{
         match ($lhs, $rhs) {
             (lhs, rhs) => asm!("cmp {lhs}, {rhs}"),
@@ -372,6 +408,12 @@ macro_rules! bt {
 }
 
 macro_rules! add {
+    ($lhs: expr, [$rhs: expr] $(,)?) => {{
+        match ($lhs, $rhs) {
+            (lhs, rhs) => asm!("add {lhs}, qword ptr {Addr::from(rhs)}"),
+        }
+    }};
+
     ([$lhs: expr], $rhs: expr $(,)?) => {{
         match ($lhs, $rhs) {
             (lhs, rhs) => asm!("add qword ptr {Addr::from(lhs)}, {rhs}"),
@@ -440,6 +482,13 @@ macro_rules! and {
         }
     }};
 }
+macro_rules! xor {
+    ($lhs: expr, $rhs: expr $(,)?) => {{
+        match ($lhs, $rhs) {
+            (lhs, rhs) => asm!("xor {lhs}, {rhs}"),
+        }
+    }};
+}
 
 macro_rules! lea {
     ($lhs: expr, [$rhs: expr] $(,)?) => {{
@@ -469,10 +518,32 @@ macro_rules! call {
     };
 }
 
+macro_rules! pop {
+    ($e: expr) => {
+        match $e {
+            e => asm!("pop {e}"),
+        }
+    };
+}
+
 macro_rules! jnz {
     ($label: ident) => {
         let name = label!($label);
         asm!("jnz {name}");
+    };
+}
+
+macro_rules! jl {
+    ($label: ident) => {
+        let name = label!($label);
+        asm!("jl {name}");
+    };
+}
+
+macro_rules! jnl {
+    ($label: ident) => {
+        let name = label!($label);
+        asm!("jnl {name}");
     };
 }
 
@@ -635,6 +706,20 @@ impl Add<isize> for PtrIndexScale {
             scale: self.scale,
             offset: rhs,
             static_offset: None,
+        }
+    }
+}
+
+impl<'a> Add<isize> for PtrStatic<'a> {
+    type Output = Addr<'a>;
+
+    fn add(self, rhs: isize) -> Self::Output {
+        Addr {
+            ptr: self.ptr,
+            index: rsp,
+            scale: 0,
+            offset: rhs,
+            static_offset: Some(self.offset),
         }
     }
 }
@@ -924,7 +1009,7 @@ impl Display for Addr<'_> {
 
 impl Target {
     fn load_imp(self, mask: Option<isize>, dst: isize, src: Addr) -> String {
-        let Self { ty, simd } = self;
+        let Self { ty: _, simd } = self;
 
         let reg = simd.reg();
 
@@ -952,7 +1037,7 @@ impl Target {
     }
 
     fn store_imp(self, mask: Option<isize>, dst: Addr, src: isize) -> String {
-        let Self { ty, simd } = self;
+        let Self { ty: _, simd } = self;
 
         let reg = simd.reg();
 
@@ -1060,6 +1145,19 @@ impl Target {
         }
     }
 
+    fn kand(self, dst: isize, lhs: isize, rhs: isize) -> String {
+        if self.simd.dedicated_mask() {
+            match self.ty {
+                Ty::F32 | Ty::C32 => format!("kandw k{dst}, k{lhs}, k{rhs}"),
+                Ty::F64 | Ty::C64 => format!("kandb k{dst}, k{lhs}, k{rhs}"),
+            }
+        } else {
+            let Self { ty, simd } = self;
+            let reg = simd.reg();
+            format!("vandp{ty.suffix()} {reg}{dst}, {reg}{lhs}, {reg}{rhs}")
+        }
+    }
+
     fn scalar(self) -> Self {
         Self {
             ty: self.ty,
@@ -1102,6 +1200,12 @@ impl Target {
         let Self { ty, simd } = self;
         let reg = simd.reg();
         format!("vmul{self.scalar_suffix()}{ty.suffix()} {reg}{dst}, {reg}{lhs}, {reg}{rhs}")
+    }
+
+    fn vmul_mem(self, dst: isize, lhs: isize, rhs: Addr) -> String {
+        let Self { ty, simd } = self;
+        let reg = simd.reg();
+        format!("vmul{self.scalar_suffix()}{ty.suffix()} {reg}{dst}, {reg}{lhs}, {rhs}")
     }
 
     fn vfma231(self, dst: isize, lhs: isize, rhs: isize) -> String {
@@ -1601,7 +1705,8 @@ impl Target {
     fn microkernel(self, m: isize, n: isize) -> (String, String) {
         let Self { ty, simd } = self;
         let bits = simd.sizeof() * 8;
-        let need_mask = m * self.len() > 2;
+        let need_mask = simd.sizeof() >= 16;
+
         let unroll = if m * n <= 6 && !need_mask { 2 } else { 1 };
 
         let ctx = Ctx::new();
@@ -1620,6 +1725,8 @@ impl Target {
         let flags_accum = 0;
         let flags_conj_lhs = 1;
         let flags_conj_diff = 2;
+        let flags_lower = 3;
+        let flags_upper = 4;
 
         ctx[rsp].set(true);
         ctx[lhs].set(true);
@@ -1711,7 +1818,10 @@ impl Target {
 
                     {
                         reg!(tmp);
-                        lea!(tmp, [rip + &format!("{prefix}.mask.data")]);
+                        lea!(
+                            tmp,
+                            [rip + &format!("{prefix}.mask.data") + 4 * self.mask_sizeof()]
+                        );
 
                         if self.mask_sizeof() <= 8 {
                             lea!(
@@ -1749,6 +1859,12 @@ impl Target {
                     let epilogue_store_add;
                     let epilogue_mask_overwrite;
                     let epilogue_mask_add;
+                    let epilogue_lower;
+                    let epilogue_lower_overwrite;
+                    let epilogue_lower_add;
+                    let epilogue_upper;
+                    let epilogue_upper_overwrite;
+                    let epilogue_upper_add;
                     let end;
                 });
 
@@ -1870,6 +1986,12 @@ impl Target {
                 }
                 label!(epilogue = _);
 
+                bt!([info + INFO_FLAGS], flags_lower);
+                jc!(epilogue_lower);
+
+                bt!([info + INFO_FLAGS], flags_upper);
+                jc!(epilogue_upper);
+
                 cmp!(nrows, m * self.len());
                 jnc!(epilogue_store);
 
@@ -1905,6 +2027,36 @@ impl Target {
                     jmp!(end);
                 }
 
+                label!(epilogue_lower = _);
+                if need_mask {
+                    bt!([info + INFO_FLAGS], flags_accum);
+                    jnc!(epilogue_lower_overwrite);
+
+                    label!(epilogue_lower_add = _);
+                    call!("{prefix}.epilogue.mask.lower.add {suffix}");
+                    jmp!(end);
+
+                    label!(epilogue_lower_overwrite = _);
+                    call!("{prefix}.epilogue.mask.lower.overwrite {suffix}");
+                    jmp!(end);
+                }
+
+                label!(epilogue_upper = _);
+                if need_mask {
+                    bt!([info + INFO_FLAGS], flags_accum);
+                    jnc!(epilogue_upper_overwrite);
+
+                    label!(epilogue_upper_add = _);
+                    call!("{prefix}.epilogue.mask.upper.add {suffix}");
+                    jmp!(end);
+
+                    label!(epilogue_upper_overwrite = _);
+                    call!("{prefix}.epilogue.mask.upper.overwrite {suffix}");
+                    jmp!(end);
+                }
+
+                abort!();
+
                 label!(end = _);
 
                 name!().clone()
@@ -1917,126 +2069,125 @@ impl Target {
             ctx[lhs_rs].set(true);
             ctx[mask_ptr].set(true);
 
-            for mask in if need_mask {
-                vec![false, true]
-            } else {
-                vec![false]
-            } {
-                let __mask__ = if mask { ".mask" } else { ".load" };
+            for diag in [false, true] {
+                let __diag__ = if diag { ".diag" } else { "" };
 
-                for pack_lhs in [false, true] {
-                    let __pack_lhs__ = if pack_lhs { ".packA" } else { "" };
+                for mask in if need_mask {
+                    vec![false, true]
+                } else {
+                    vec![false]
+                } {
+                    let __mask__ = if mask { ".mask" } else { ".load" };
 
-                    for pack_rhs in [false, true] {
-                        let __pack_rhs__ = if pack_rhs { ".packB" } else { "" };
+                    for pack_lhs in [false, true] {
+                        let __pack_lhs__ = if pack_lhs { ".packA" } else { "" };
 
-                        for conj in if self.is_cplx() {
-                            vec![false, true]
-                        } else {
-                            vec![false]
-                        } {
-                            let __conj__ = if conj { ".conj" } else { "" };
+                        for pack_rhs in [false, true] {
+                            let __pack_rhs__ = if pack_rhs { ".packB" } else { "" };
 
-                            func!(
-                                "{prefix}{__conj__}{__mask__}{__pack_lhs__}{__pack_rhs__} {suffix}"
-                            );
-                            label!({
-                                let start;
-                                let nanokernel;
-                            });
-                            if self.is_cplx() && !conj {
-                                bt!([info + INFO_FLAGS], flags_conj_diff);
-                                jnc!(start);
-                                jmp!(
-                                    "{prefix}.conj{__mask__}{__pack_lhs__}{__pack_rhs__} {suffix}"
+                            for conj in if self.is_cplx() {
+                                vec![false, true]
+                            } else {
+                                vec![false]
+                            } {
+                                let __conj__ = if conj { ".conj" } else { "" };
+
+                                func!(
+                                    "{prefix}{__conj__}{__diag__}{__mask__}{__pack_lhs__}{__pack_rhs__} {suffix}"
                                 );
-                            }
-                            label!(start = _);
+                                label!({
+                                    let start0;
+                                    let start1;
+                                    let nanokernel;
+                                });
+                                if self.is_cplx() && !conj {
+                                    bt!([info + INFO_FLAGS], flags_conj_diff);
+                                    jnc!(start0);
+                                    jmp!(
+                                        "{prefix}.conj{__diag__}{__mask__}{__pack_lhs__}{__pack_rhs__} {suffix}"
+                                    );
+                                }
+                                label!(start0 = _);
 
-                            let rhs_neg_cs = lhs_rs;
+                                if !diag {
+                                    cmp!([info + INFO_DIAG_PTR], 0);
+                                    jz!(start1);
+                                    jmp!(
+                                        "{prefix}{__conj__}.diag{__mask__}{__pack_lhs__}{__pack_rhs__} {suffix}"
+                                    );
+                                }
+                                label!(start1 = _);
 
-                            mov!(rhs_neg_cs, rhs_cs);
-                            neg!(rhs_neg_cs);
-                            add!(rhs, rhs_cs);
+                                let rhs_neg_cs = lhs_rs;
 
-                            if mask && simd.dedicated_mask() {
-                                kmov!(k(1), [mask_ptr]);
-                            }
+                                mov!(rhs_neg_cs, rhs_cs);
+                                neg!(rhs_neg_cs);
+                                add!(rhs, rhs_cs);
 
-                            label!(nanokernel = _);
-                            let bcst = bits == 512 && m == 1 && !pack_rhs;
+                                reg!(diag_ptr);
+                                if diag {
+                                    mov!(diag_ptr, [info + INFO_DIAG_PTR]);
+                                }
 
-                            for iter in 0..unroll {
-                                for j in 0..n {
-                                    let rhs_addr = if j % 4 == 0 {
-                                        rhs + 1 * rhs_neg_cs
-                                    } else {
-                                        rhs + (j % 4 - 1) * rhs_cs
-                                    };
+                                if mask && simd.dedicated_mask() {
+                                    kmov!(k(1), [mask_ptr]);
+                                }
 
-                                    if !bcst {
-                                        vbroadcast!(zmm(m * n * unroll + m), [rhs_addr]);
-                                        if self.is_real() && n > 4 {
-                                            if j + 1 == 4 {
-                                                lea!(rhs, [rhs + rhs_cs * 4]);
-                                            }
-                                        }
+                                label!(nanokernel = _);
+                                let bcst = bits == 512 && m == 1 && !pack_rhs;
 
-                                        if self.is_real() && j + 1 == n {
-                                            if n > 4 {
-                                                lea!(rhs, [rhs + rhs_neg_cs * 4]);
-                                            }
-                                            add!(rhs, rhs_rs);
-                                        }
-                                    }
+                                for iter in 0..unroll {
+                                    let d = if diag { m * n * unroll + m } else { 0 };
 
-                                    if pack_rhs {
-                                        vmovsr!(
-                                            [packed_rhs + j * ty.sizeof()],
-                                            xmm(m * n * unroll + m)
-                                        );
-                                        if self.is_real() && j + 1 == n {
-                                            add!(packed_rhs, n * ty.sizeof());
-                                        }
-                                    }
+                                    if diag {
+                                        vbroadcast!(zmm(d), [diag_ptr]);
 
-                                    for i in 0..m {
-                                        if j == 0 {
+                                        for i in 0..m {
                                             if !mask || i + 1 < m {
                                                 vmov!(
                                                     zmm(m * n * unroll + i),
-                                                    [lhs + simd.sizeof() * i]
+                                                    [lhs + simd.sizeof() * i],
                                                 );
                                             } else {
                                                 if simd.dedicated_mask() {
                                                     vmov!(
                                                         zmm(m * n * unroll + i)[1],
-                                                        [lhs + simd.sizeof() * i]
+                                                        [lhs + simd.sizeof() * i],
                                                     );
                                                 } else {
                                                     vmov!(zmm(m * n * unroll + i), [mask_ptr]);
                                                     vmov!(
                                                         zmm(m * n * unroll + i)[m * n * unroll + i],
-                                                        [lhs + simd.sizeof() * i]
+                                                        [lhs + simd.sizeof() * i],
                                                     );
                                                 }
                                             }
-                                        }
-                                        if bcst {
-                                            if conj {
-                                                vfma231_conj!(
-                                                    zmm(m * n * iter + m * j + i),
-                                                    zmm(m * n * unroll + i),
-                                                    [rhs_addr],
-                                                );
-                                            } else {
-                                                vfma231!(
-                                                    zmm(m * n * iter + m * j + i),
-                                                    zmm(m * n * unroll + i),
-                                                    [rhs_addr],
+                                            if pack_lhs {
+                                                vmov!(
+                                                    [packed_lhs + simd.sizeof() * i],
+                                                    zmm(m * n * unroll + i)
                                                 );
                                             }
+                                        }
 
+                                        for i in 0..m {
+                                            vmul!(
+                                                zmm(m * n * unroll + i),
+                                                zmm(d),
+                                                zmm(m * n * unroll + i),
+                                            );
+                                        }
+                                    }
+
+                                    for j in 0..n {
+                                        let rhs_addr = if j % 4 == 0 {
+                                            rhs + 1 * rhs_neg_cs
+                                        } else {
+                                            rhs + (j % 4 - 1) * rhs_cs
+                                        };
+
+                                        if !bcst {
+                                            vbroadcast!(zmm(m * n * unroll + m), [rhs_addr]);
                                             if self.is_real() && n > 4 {
                                                 if j + 1 == 4 {
                                                     lea!(rhs, [rhs + rhs_cs * 4]);
@@ -2049,75 +2200,62 @@ impl Target {
                                                 }
                                                 add!(rhs, rhs_rs);
                                             }
-                                        } else {
-                                            if conj {
-                                                vfma231_conj!(
-                                                    zmm(m * n * iter + m * j + i),
-                                                    zmm(m * n * unroll + i),
-                                                    zmm(m * n * unroll + m),
-                                                );
-                                            } else {
-                                                vfma231!(
-                                                    zmm(m * n * iter + m * j + i),
-                                                    zmm(m * n * unroll + i),
-                                                    zmm(m * n * unroll + m),
-                                                );
-                                            }
-                                        }
-
-                                        if j == 0 && pack_lhs {
-                                            vmov!(
-                                                [packed_lhs + simd.sizeof() * i],
-                                                zmm(m * n * unroll + i)
-                                            );
-                                        }
-                                    }
-
-                                    if j == 0 {
-                                        add!(lhs, lhs_cs);
-                                        if pack_lhs {
-                                            add!(packed_lhs, simd.sizeof() * m);
-                                        }
-                                    }
-                                }
-
-                                if self.is_cplx() {
-                                    for j in 0..n {
-                                        let rhs_addr = if j % 4 == 0 {
-                                            rhs + 1 * rhs_neg_cs + ty.sizeof() / 2
-                                        } else {
-                                            rhs + (j % 4 - 1) * rhs_cs + ty.sizeof() / 2
-                                        };
-
-                                        if !bcst {
-                                            vbroadcast!(zmm(m * n * unroll + m), [rhs_addr]);
-                                            if n > 4 {
-                                                if (j + 1) % 4 == 0 {
-                                                    lea!(rhs, [rhs + rhs_cs * 4]);
-                                                }
-                                            }
-
-                                            if j + 1 == n {
-                                                if n > 4 {
-                                                    lea!(rhs, [rhs + rhs_neg_cs * 4]);
-                                                }
-                                                add!(rhs, rhs_rs);
-                                            }
                                         }
 
                                         if pack_rhs {
                                             vmovsr!(
-                                                [packed_rhs + (j * ty.sizeof() + ty.sizeof() / 2)],
+                                                [packed_rhs + j * ty.sizeof()],
                                                 xmm(m * n * unroll + m)
                                             );
-                                            if j + 1 == n {
+                                            if self.is_real() && j + 1 == n {
                                                 add!(packed_rhs, n * ty.sizeof());
                                             }
                                         }
 
                                         for i in 0..m {
-                                            if j == 0 {
-                                                vswap!(zmm(m * n * unroll + i));
+                                            if !diag && j == 0 {
+                                                if !mask || i + 1 < m {
+                                                    if diag {
+                                                        vmul!(
+                                                            zmm(m * n * unroll + i),
+                                                            zmm(d),
+                                                            [lhs + simd.sizeof() * i],
+                                                        );
+                                                    } else {
+                                                        vmov!(
+                                                            zmm(m * n * unroll + i),
+                                                            [lhs + simd.sizeof() * i],
+                                                        );
+                                                    }
+                                                } else {
+                                                    if simd.dedicated_mask() {
+                                                        vmov!(
+                                                            zmm(m * n * unroll + i)[1],
+                                                            [lhs + simd.sizeof() * i],
+                                                        );
+                                                    } else {
+                                                        vmov!(zmm(m * n * unroll + i), [mask_ptr]);
+                                                        vmov!(
+                                                            zmm(m * n * unroll + i)
+                                                                [m * n * unroll + i],
+                                                            [lhs + simd.sizeof() * i],
+                                                        );
+                                                    }
+                                                    if diag {
+                                                        vmul!(
+                                                            zmm(m * n * unroll + i),
+                                                            zmm(d),
+                                                            zmm(m * n * unroll + i),
+                                                        );
+                                                    }
+                                                }
+                                                if pack_lhs {
+                                                    assert!(!diag);
+                                                    vmov!(
+                                                        [packed_lhs + simd.sizeof() * i],
+                                                        zmm(m * n * unroll + i)
+                                                    );
+                                                }
                                             }
                                             if bcst {
                                                 if conj {
@@ -2134,13 +2272,13 @@ impl Target {
                                                     );
                                                 }
 
-                                                if n > 4 {
+                                                if self.is_real() && n > 4 {
                                                     if j + 1 == 4 {
                                                         lea!(rhs, [rhs + rhs_cs * 4]);
                                                     }
                                                 }
 
-                                                if j + 1 == n {
+                                                if self.is_real() && j + 1 == n {
                                                     if n > 4 {
                                                         lea!(rhs, [rhs + rhs_neg_cs * 4]);
                                                     }
@@ -2162,19 +2300,115 @@ impl Target {
                                                 }
                                             }
                                         }
+
+                                        if j == 0 {
+                                            add!(lhs, lhs_cs);
+                                            if pack_lhs {
+                                                add!(packed_lhs, simd.sizeof() * m);
+                                            }
+                                        }
+                                    }
+
+                                    if self.is_cplx() {
+                                        for j in 0..n {
+                                            let rhs_addr = if j % 4 == 0 {
+                                                rhs + 1 * rhs_neg_cs + ty.sizeof() / 2
+                                            } else {
+                                                rhs + (j % 4 - 1) * rhs_cs + ty.sizeof() / 2
+                                            };
+
+                                            if !bcst {
+                                                vbroadcast!(zmm(m * n * unroll + m), [rhs_addr]);
+                                                if n > 4 {
+                                                    if (j + 1) % 4 == 0 {
+                                                        lea!(rhs, [rhs + rhs_cs * 4]);
+                                                    }
+                                                }
+
+                                                if j + 1 == n {
+                                                    if n > 4 {
+                                                        lea!(rhs, [rhs + rhs_neg_cs * 4]);
+                                                    }
+                                                    add!(rhs, rhs_rs);
+                                                }
+                                            }
+
+                                            if pack_rhs {
+                                                vmovsr!(
+                                                    [packed_rhs
+                                                        + (j * ty.sizeof() + ty.sizeof() / 2)],
+                                                    xmm(m * n * unroll + m)
+                                                );
+                                                if j + 1 == n {
+                                                    add!(packed_rhs, n * ty.sizeof());
+                                                }
+                                            }
+
+                                            for i in 0..m {
+                                                if j == 0 {
+                                                    vswap!(zmm(m * n * unroll + i));
+                                                }
+                                                if bcst {
+                                                    if conj {
+                                                        vfma231_conj!(
+                                                            zmm(m * n * iter + m * j + i),
+                                                            zmm(m * n * unroll + i),
+                                                            [rhs_addr],
+                                                        );
+                                                    } else {
+                                                        vfma231!(
+                                                            zmm(m * n * iter + m * j + i),
+                                                            zmm(m * n * unroll + i),
+                                                            [rhs_addr],
+                                                        );
+                                                    }
+
+                                                    if n > 4 {
+                                                        if j + 1 == 4 {
+                                                            lea!(rhs, [rhs + rhs_cs * 4]);
+                                                        }
+                                                    }
+
+                                                    if j + 1 == n {
+                                                        if n > 4 {
+                                                            lea!(rhs, [rhs + rhs_neg_cs * 4]);
+                                                        }
+                                                        add!(rhs, rhs_rs);
+                                                    }
+                                                } else {
+                                                    if conj {
+                                                        vfma231_conj!(
+                                                            zmm(m * n * iter + m * j + i),
+                                                            zmm(m * n * unroll + i),
+                                                            zmm(m * n * unroll + m),
+                                                        );
+                                                    } else {
+                                                        vfma231!(
+                                                            zmm(m * n * iter + m * j + i),
+                                                            zmm(m * n * unroll + i),
+                                                            zmm(m * n * unroll + m),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                            if unroll == 1 {
-                                dec!(depth);
-                            } else {
-                                sub!(depth, unroll);
-                            }
-                            jnz!(nanokernel);
+                                if diag {
+                                    add!(diag_ptr, [info + INFO_DIAG_STRIDE]);
+                                }
 
-                            for iter in 1..unroll {
-                                for i in 0..m * n {
-                                    vadd!(zmm(i), zmm(i), zmm(m * n * iter + i));
+                                if unroll == 1 {
+                                    dec!(depth);
+                                } else {
+                                    sub!(depth, unroll);
+                                }
+                                jnz!(nanokernel);
+
+                                for iter in 1..unroll {
+                                    for i in 0..m * n {
+                                        vadd!(zmm(i), zmm(i), zmm(m * n * iter + i));
+                                    }
                                 }
                             }
                         }
@@ -2191,29 +2425,180 @@ impl Target {
             main
         };
 
-        for mask in if need_mask {
-            vec![false, true]
-        } else {
-            vec![false]
-        } {
-            let __mask__ = if mask { ".mask" } else { ".store" };
+        let __triangle__ = [".lower", ".upper", ""];
 
-            for add in [false, true] {
-                let __add__ = if add { ".add" } else { ".overwrite" };
+        for triangle in 0..3 {
+            let __triangle__ = __triangle__[triangle];
 
-                func!("{prefix}.epilogue{__mask__}{__add__} {suffix}");
-                reg!(ptr);
-                reg!(rs);
-                reg!(cs);
-                mov!(ptr, [info + INFO_PTR]);
-                mov!(rs, [info + INFO_RS]);
-                mov!(cs, [info + INFO_CS]);
+            let mut mask = vec![];
+            if need_mask {
+                mask.push(true);
+            }
+            if triangle == 2 {
+                mask.push(false);
+            }
 
-                {
+            for &mask in &mask {
+                let __mask__ = if mask { ".mask" } else { ".store" };
+
+                for add in [false, true] {
+                    let __add__ = if add { ".add" } else { ".overwrite" };
+
+                    func!("{prefix}.epilogue{__mask__}{__triangle__}{__add__} {suffix}");
+                    label!({
+                        let rowmajor;
+                        let colmajor;
+                        let end;
+                        let finale;
+                    });
+
+                    reg!(ptr);
+                    reg!(rs);
+                    reg!(cs);
                     reg!(row);
                     reg!(col);
+
+                    mov!(ptr, [info + INFO_PTR]);
+                    mov!(rs, [info + INFO_RS]);
+                    mov!(cs, [info + INFO_CS]);
                     mov!(row, [position]);
                     mov!(col, [position + WORD]);
+
+                    if triangle == 0 {
+                        sub!(row, col);
+
+                        {
+                            label!({
+                                let cont;
+                            });
+
+                            cmp!(row, -(self.len() - 1));
+                            jnl!(cont);
+                            {
+                                if m > 1 {
+                                    {
+                                        for j in 0..n {
+                                            for i in 1..m {
+                                                vmov!(zmm((i - 1) + (m - 1) * j), zmm(i + m * j));
+                                            }
+                                        }
+                                        alloca!([position]);
+                                        alloca!([position + WORD]);
+                                        alloca!(nrows);
+                                        alloca!(ncols);
+
+                                        add!([position], self.len());
+                                        sub!(nrows, self.len());
+                                        call!(
+                                            "{prefix}.epilogue{__mask__}{__triangle__}{__add__} [with m = {(m - 1) * self.len()}, n = {n}]"
+                                        );
+                                    }
+                                    jmp!(finale);
+                                } else {
+                                    jmp!(finale);
+                                }
+                            }
+
+                            label!(cont = _);
+                        }
+
+                        {
+                            label!({
+                                let cont;
+                            });
+
+                            cmp!(row, n - 1);
+                            jl!(cont);
+
+                            {
+                                pop!(col);
+                                pop!(row);
+                                pop!(cs);
+                                pop!(rs);
+                                pop!(ptr);
+                                jmp!("{prefix}.epilogue{__mask__}{__add__} {suffix}");
+                            }
+                            label!(cont = _);
+                        }
+
+                        add!(row, col);
+                    }
+                    if triangle == 1 {
+                        sub!(col, row);
+                        {
+                            label!({
+                                let cont;
+                            });
+
+                            cmp!(col, (m - 1) * self.len() - (n - 1));
+                            jnl!(cont);
+
+                            {
+                                if m > 1 {
+                                    {
+                                        for j in 1..n {
+                                            for i in 0..m - 1 {
+                                                vmov!(zmm(i + (m - 1) * j), zmm(i + m * j));
+                                            }
+                                        }
+                                        alloca!([position]);
+                                        alloca!([position + WORD]);
+                                        alloca!(nrows);
+                                        alloca!(ncols);
+
+                                        call!(
+                                            "{prefix}.epilogue{__mask__}{__triangle__}{__add__} [with m = {(m - 1) * self.len()}, n = {n}]"
+                                        );
+                                    }
+                                    jmp!(finale);
+                                } else {
+                                    jmp!(finale);
+                                }
+                            }
+
+                            label!(cont = _);
+                        }
+
+                        {
+                            label!({
+                                let cont;
+                            });
+
+                            add!(col, 1);
+                            cmp!(col, nrows);
+                            jl!(cont);
+
+                            {
+                                pop!(col);
+                                pop!(row);
+                                pop!(cs);
+                                pop!(rs);
+                                pop!(ptr);
+                                jmp!("{prefix}.epilogue{__mask__}{__add__} {suffix}");
+                            }
+                            label!(cont = _);
+                            sub!(col, 1);
+                        }
+                        add!(col, row);
+                    }
+
+                    if mask && triangle == 2 {
+                        label!({
+                            let cont;
+                        });
+                        cmp!(nrows, m * self.len());
+                        jc!(cont);
+
+                        {
+                            pop!(col);
+                            pop!(row);
+                            pop!(cs);
+                            pop!(rs);
+                            pop!(ptr);
+                            jmp!("{prefix}.epilogue.store{__triangle__}{__add__} {suffix}");
+                        }
+                        label!(cont = _);
+                    }
 
                     imul!(col, cs);
                     add!(ptr, col);
@@ -2222,10 +2607,21 @@ impl Target {
                     add!(ptr, row);
 
                     {
-                        let alpha_ptr = row;
+                        mov!(row, [position]);
+                        mov!(col, [position + WORD]);
+                        sub!(row, col);
+                        let diff = row;
+                        shl!(diff, self.mask_sizeof().ilog2());
+                        if triangle == 1 {
+                            neg!(diff);
+                        }
+
+                        let alpha_ptr = col;
+
                         let alpha_re = m * n;
                         let alpha_im = m * n + 1;
                         let mask_ = if simd.dedicated_mask() { 1 } else { m * n + 2 };
+                        let mask2_ = if simd.dedicated_mask() { 2 } else { alpha_im };
                         let tmp = m * n + 3;
 
                         if self.is_cplx() {
@@ -2294,14 +2690,41 @@ impl Target {
                         }
 
                         if mask {
+                            label!({
+                                let load_mask;
+                            });
+
+                            cmp!(nrows, m * self.len());
+                            jc!(load_mask);
+                            lea!(
+                                mask_ptr,
+                                [rip + &format!("{prefix}.mask.data")
+                                    + (4 + self.len()) * self.mask_sizeof()]
+                            );
+
+                            label!(load_mask = _);
                             kmov!(k(mask_), [mask_ptr]);
+                            if triangle == 0 {
+                                lea!(
+                                    mask_ptr,
+                                    [rip + &format!("{prefix}.rmask.data")
+                                        + 4 * self.mask_sizeof()]
+                                );
+                            }
+                            if triangle == 1 {
+                                lea!(
+                                    mask_ptr,
+                                    [
+                                        rip + &format!("{prefix}.mask.data")
+                                            + 4 * self.mask_sizeof()
+                                    ]
+                                );
+                            }
                         }
 
                         for j in 0..n {
                             for i in 0..m {
                                 let src = m * j + i;
-                                let ptr = ptr + simd.sizeof() * i;
-
                                 if self.is_cplx() || !add {
                                     if self.is_cplx() {
                                         vswap!(zmm(src));
@@ -2313,8 +2736,15 @@ impl Target {
                                         vmul!(zmm(src), zmm(src), zmm(alpha_re));
                                     }
                                 };
+                            }
+                        }
 
-                                if !mask || i + 1 < m {
+                        for j in 0..n {
+                            for i in 0..m {
+                                let src = m * j + i;
+                                let ptr = ptr + simd.sizeof() * i;
+
+                                if (!mask || i + 1 < m) && (triangle == 2 || i > 0) {
                                     if add {
                                         if self.is_cplx() {
                                             vadd!(zmm(src), zmm(src), [ptr]);
@@ -2324,6 +2754,32 @@ impl Target {
                                     }
                                     vmov!([ptr], zmm(src));
                                 } else {
+                                    let mask_ = if triangle == 0 && i == 0 {
+                                        kmov!(
+                                            k(mask2_),
+                                            [mask_ptr
+                                                + 1 * diff
+                                                + self.mask_sizeof() * (self.len() - j)],
+                                        );
+                                        if i + 1 == m {
+                                            kand!(k(mask2_), k(mask2_), k(mask_));
+                                        }
+
+                                        mask2_
+                                    } else if triangle == 1 && i == 0 {
+                                        kmov!(
+                                            k(mask2_),
+                                            [mask_ptr + 1 * diff + self.mask_sizeof() * (j + 1)]
+                                        );
+                                        if i + 1 == m {
+                                            kand!(k(mask2_), k(mask2_), k(mask_));
+                                        }
+
+                                        mask2_
+                                    } else {
+                                        mask_
+                                    };
+
                                     if add {
                                         vmov!(zmm(tmp)[mask_], [ptr]);
 
@@ -2339,51 +2795,54 @@ impl Target {
                             add!(ptr, cs);
                         }
                     }
-                }
-                label!({
-                    let rowmajor;
-                    let colmajor;
-                    let end;
-                });
-                bt!([rsi], 63);
-                jc!(rowmajor);
 
-                label!(colmajor = _);
-                {
-                    if mask {
-                        add!([position], nrows);
+                    label!(finale = _);
+                    let tmp = ptr;
+                    mov!(tmp, m * self.len());
+                    cmp!(nrows, tmp);
+                    cmovc!(tmp, nrows);
+
+                    bt!([rsi], 63);
+                    jc!(rowmajor);
+
+                    label!(colmajor = _);
+                    {
+                        if mask {
+                            add!([position], tmp);
+                            sub!(nrows, tmp);
+
+                            jnz!(end);
+                            sub!(ncols, n);
+                            add!([position + WORD], n);
+                        } else {
+                            add!([position], m * self.len());
+                            sub!(nrows, m * self.len());
+                            jnz!(end);
+
+                            sub!(ncols, n);
+                            add!([position + WORD], n);
+                        }
+                    }
+                    jmp!(end);
+
+                    label!(rowmajor = _);
+                    {
                         add!([position + WORD], n);
-
-                        mov!(nrows, 0);
                         sub!(ncols, n);
-                    } else {
-                        add!([position], m * self.len());
-                        sub!(nrows, m * self.len());
+
                         jnz!(end);
 
-                        sub!(ncols, n);
-                        add!([position + WORD], n);
+                        if mask {
+                            add!([position], tmp);
+                            sub!(nrows, tmp);
+                        } else {
+                            add!([position], m * self.len());
+                            sub!(nrows, m * self.len());
+                        }
                     }
+
+                    label!(end = _);
                 }
-                jmp!(end);
-
-                label!(rowmajor = _);
-                {
-                    add!([position + WORD], n);
-                    sub!(ncols, n);
-
-                    jnz!(end);
-
-                    if mask {
-                        add!([position], nrows);
-                        mov!(nrows, 0);
-                    } else {
-                        add!([position], m * self.len());
-                        sub!(nrows, m * self.len());
-                    }
-                }
-
-                label!(end = _);
             }
         }
 
@@ -2608,56 +3067,40 @@ fn main() -> Result {
 
         code += &format!(
             "
+                const fn reverse<T: Copy, const N: usize>(x: [T; N]) -> [T; N] {{
+                    let mut y = x;
+                    let mut i = 0;
+                    while i < N {{
+                        y[i] = x[N - i - 1];
+                        i += 1;
+                    }}
+                    y
+                }}
+
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd128.mask.data{QUOTE})]
-                 static __MASK_F32_128__: [::core::arch::x86_64::__m128i; 5] = unsafe {{::core::mem::transmute([
+                 static __MASK_F32_128__: [::core::arch::x86_64::__m128i; 5 + 8] = unsafe {{::core::mem::transmute([
                     [ 0,  0,  0, 0i32],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
                     [-1,  0,  0,    0],
                     [-1, -1,  0,    0],
                     [-1, -1, -1,    0],
                     [-1, -1, -1,   -1],
-                ])}};
-
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd256.mask.data{QUOTE})]
-                 static __MASK_F64_256__: [::core::arch::x86_64::__m256i; 5] = unsafe {{::core::mem::transmute([
-                    [ 0,  0,  0, 0i64],
-                    [-1,  0,  0,    0],
-                    [-1, -1,  0,    0],
-                    [-1, -1, -1,    0],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
                     [-1, -1, -1,   -1],
                 ])}};
-
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd512.mask.data{QUOTE})]
-                 static __MASK_F64_512__: [u8; 9] = [
-                    0b00000000,
-                    0b00000001,
-                    0b00000011,
-                    0b00000111,
-                    0b00001111,
-                    0b00011111,
-                    0b00111111,
-                    0b01111111,
-                    0b11111111,
-                ];
-
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd256.mask.data{QUOTE})]
-                 static __MASK_C64_256__: [::core::arch::x86_64::__m256i; 3] = unsafe {{::core::mem::transmute([
-                    [ 0,  0,  0, 0i64],
-                    [-1, -1,  0,    0],
-                    [-1, -1, -1,   -1],
-                ])}};
-
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd512.mask.data{QUOTE})]
-                 static __MASK_C64_512__: [u8; 5] = [
-                    0b00000000,
-                    0b00000011,
-                    0b00001111,
-                    0b00111111,
-                    0b11111111,
-                ];
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd256.mask.data{QUOTE})]
-                 static __MASK_F32_256__: [::core::arch::x86_64::__m256i; 9] = unsafe {{::core::mem::transmute([
+                 static __MASK_F32_256__: [::core::arch::x86_64::__m256i; 9 + 8] = unsafe {{::core::mem::transmute([
                     [ 0,  0,  0,  0,  0,  0,  0, 0i32],
+                    [ 0,  0,  0,  0,  0,  0,  0,    0],
+                    [ 0,  0,  0,  0,  0,  0,  0,    0],
+                    [ 0,  0,  0,  0,  0,  0,  0,    0],
+                    [ 0,  0,  0,  0,  0,  0,  0,    0],
                     [-1,  0,  0,  0,  0,  0,  0,    0],
                     [-1, -1,  0,  0,  0,  0,  0,    0],
                     [-1, -1, -1,  0,  0,  0,  0,    0],
@@ -2666,10 +3109,18 @@ fn main() -> Result {
                     [-1, -1, -1, -1, -1, -1,  0,    0],
                     [-1, -1, -1, -1, -1, -1, -1,    0],
                     [-1, -1, -1, -1, -1, -1, -1,   -1],
+                    [-1, -1, -1, -1, -1, -1, -1,   -1],
+                    [-1, -1, -1, -1, -1, -1, -1,   -1],
+                    [-1, -1, -1, -1, -1, -1, -1,   -1],
+                    [-1, -1, -1, -1, -1, -1, -1,   -1],
                 ])}};
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd512.mask.data{QUOTE})]
-                 static __MASK_F32_512__: [u16; 17] = [
+                 static __MASK_F32_512__: [u16; 17 + 8] = [
+                    0b0000000000000000,
+                    0b0000000000000000,
+                    0b0000000000000000,
+                    0b0000000000000000,
                     0b0000000000000000,
                     0b0000000000000001,
                     0b0000000000000011,
@@ -2687,19 +3138,149 @@ fn main() -> Result {
                     0b0011111111111111,
                     0b0111111111111111,
                     0b1111111111111111,
+                    0b1111111111111111,
+                    0b1111111111111111,
+                    0b1111111111111111,
+                    0b1111111111111111,
                 ];
 
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd128.mask.data{QUOTE})]
+                 static __MASK_F64_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
+                    [ 0, 0i64],
+                    [ 0,    0],
+                    [ 0,    0],
+                    [ 0,    0],
+                    [ 0,    0],
+                    [-1,    0],
+                    [-1,   -1],
+                    [-1,   -1],
+                    [-1,   -1],
+                    [-1,   -1],
+                    [-1,   -1],
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd256.mask.data{QUOTE})]
+                 static __MASK_F64_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
+                    [ 0,  0,  0, 0i64],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
+                    [-1,  0,  0,    0],
+                    [-1, -1,  0,    0],
+                    [-1, -1, -1,    0],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd512.mask.data{QUOTE})]
+                 static __MASK_F64_512__: [u8; 9 + 8] = [
+                    0b00000000,
+                    0b00000000,
+                    0b00000000,
+                    0b00000000,
+                    0b00000000,
+                    0b00000001,
+                    0b00000011,
+                    0b00000111,
+                    0b00001111,
+                    0b00011111,
+                    0b00111111,
+                    0b01111111,
+                    0b11111111,
+                    0b11111111,
+                    0b11111111,
+                    0b11111111,
+                    0b11111111,
+                ];
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd128.mask.data{QUOTE})]
+                 static __MASK_C64_128__: [::core::arch::x86_64::__m128i; 2 + 8] = unsafe {{::core::mem::transmute([
+                    [ 0, 0i64],
+                    [ 0,    0],
+                    [ 0,    0],
+                    [ 0,    0],
+                    [ 0,    0],
+                    [-1,   -1],
+                    [-1,   -1],
+                    [-1,   -1],
+                    [-1,   -1],
+                    [-1,   -1],
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd256.mask.data{QUOTE})]
+                 static __MASK_C64_256__: [::core::arch::x86_64::__m256i; 3 + 8] = unsafe {{::core::mem::transmute([
+                    [ 0,  0,  0, 0i64],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
+                    [-1, -1,  0,    0],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd512.mask.data{QUOTE})]
+                 static __MASK_C64_512__: [u8; 5 + 8] = [
+                    0b00000000,
+                    0b00000000,
+                    0b00000000,
+                    0b00000000,
+                    0b00000000,
+                    0b00000011,
+                    0b00001111,
+                    0b00111111,
+                    0b11111111,
+                    0b11111111,
+                    0b11111111,
+                    0b11111111,
+                    0b11111111,
+                ];
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd128.mask.data{QUOTE})]
+                 static __MASK_C32_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
+                    [ 0,  0,  0, 0i32],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
+                    [ 0,  0,  0,    0],
+                    [-1, -1,  0,    0],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                    [-1, -1, -1,   -1],
+                ])}};
+
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd256.mask.data{QUOTE})]
-                 static __MASK_C32_256__: [::core::arch::x86_64::__m256i; 5] = unsafe {{::core::mem::transmute([
+                 static __MASK_C32_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
                     [ 0,  0,  0,  0,  0,  0,  0, 0i32],
+                    [ 0,  0,  0,  0,  0,  0,  0,    0],
+                    [ 0,  0,  0,  0,  0,  0,  0,    0],
+                    [ 0,  0,  0,  0,  0,  0,  0,    0],
+                    [ 0,  0,  0,  0,  0,  0,  0,    0],
                     [-1, -1,  0,  0,  0,  0,  0,    0],
                     [-1, -1, -1, -1,  0,  0,  0,    0],
                     [-1, -1, -1, -1, -1, -1,  0,    0],
                     [-1, -1, -1, -1, -1, -1, -1,   -1],
+                    [-1, -1, -1, -1, -1, -1, -1,   -1],
+                    [-1, -1, -1, -1, -1, -1, -1,   -1],
+                    [-1, -1, -1, -1, -1, -1, -1,   -1],
+                    [-1, -1, -1, -1, -1, -1, -1,   -1],
                 ])}};
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd512.mask.data{QUOTE})]
-                 static __MASK_C32_512__: [u16; 9] = [
+                 static __MASK_C32_512__: [u16; 9 + 8] = [
+                    0b0000000000000000,
+                    0b0000000000000000,
+                    0b0000000000000000,
+                    0b0000000000000000,
                     0b0000000000000000,
                     0b0000000000000011,
                     0b0000000000001111,
@@ -2709,6 +3290,229 @@ fn main() -> Result {
                     0b0000111111111111,
                     0b0011111111111111,
                     0b1111111111111111,
+                    0b1111111111111111,
+                    0b1111111111111111,
+                    0b1111111111111111,
+                    0b1111111111111111,
+                ];
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd128.rmask.data{QUOTE})]
+                 static __rMASK_F32_128__: [::core::arch::x86_64::__m128i; 5 + 8] = unsafe {{::core::mem::transmute([
+                    reverse([ 0,  0,  0, 0i32]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([-1,  0,  0,    0]),
+                    reverse([-1, -1,  0,    0]),
+                    reverse([-1, -1, -1,    0]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd256.rmask.data{QUOTE})]
+                 static __rMASK_F32_256__: [::core::arch::x86_64::__m256i; 9 + 8] = unsafe {{::core::mem::transmute([
+                    reverse([ 0,  0,  0,  0,  0,  0,  0, 0i32]),
+                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
+                    reverse([-1,  0,  0,  0,  0,  0,  0,    0]),
+                    reverse([-1, -1,  0,  0,  0,  0,  0,    0]),
+                    reverse([-1, -1, -1,  0,  0,  0,  0,    0]),
+                    reverse([-1, -1, -1, -1,  0,  0,  0,    0]),
+                    reverse([-1, -1, -1, -1, -1,  0,  0,    0]),
+                    reverse([-1, -1, -1, -1, -1, -1,  0,    0]),
+                    reverse([-1, -1, -1, -1, -1, -1, -1,    0]),
+                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
+                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
+                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
+                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
+                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd512.rmask.data{QUOTE})]
+                 static __rMASK_F32_512__: [u16; 17 + 8] = [
+                    0b0000000000000000u16.reverse_bits(),
+                    0b0000000000000000u16.reverse_bits(),
+                    0b0000000000000000u16.reverse_bits(),
+                    0b0000000000000000u16.reverse_bits(),
+                    0b0000000000000000u16.reverse_bits(),
+                    0b0000000000000001u16.reverse_bits(),
+                    0b0000000000000011u16.reverse_bits(),
+                    0b0000000000000111u16.reverse_bits(),
+                    0b0000000000001111u16.reverse_bits(),
+                    0b0000000000011111u16.reverse_bits(),
+                    0b0000000000111111u16.reverse_bits(),
+                    0b0000000001111111u16.reverse_bits(),
+                    0b0000000011111111u16.reverse_bits(),
+                    0b0000000111111111u16.reverse_bits(),
+                    0b0000001111111111u16.reverse_bits(),
+                    0b0000011111111111u16.reverse_bits(),
+                    0b0000111111111111u16.reverse_bits(),
+                    0b0001111111111111u16.reverse_bits(),
+                    0b0011111111111111u16.reverse_bits(),
+                    0b0111111111111111u16.reverse_bits(),
+                    0b1111111111111111u16.reverse_bits(),
+                    0b1111111111111111u16.reverse_bits(),
+                    0b1111111111111111u16.reverse_bits(),
+                    0b1111111111111111u16.reverse_bits(),
+                    0b1111111111111111u16.reverse_bits(),
+                ];
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd128.rmask.data{QUOTE})]
+                 static __rMASK_F64_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
+                    reverse([ 0, 0i64]),
+                    reverse([ 0,    0]),
+                    reverse([ 0,    0]),
+                    reverse([ 0,    0]),
+                    reverse([ 0,    0]),
+                    reverse([-1,    0]),
+                    reverse([-1,   -1]),
+                    reverse([-1,   -1]),
+                    reverse([-1,   -1]),
+                    reverse([-1,   -1]),
+                    reverse([-1,   -1]),
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd256.rmask.data{QUOTE})]
+                 static __rMASK_F64_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
+                    reverse([ 0,  0,  0, 0i64]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([-1,  0,  0,    0]),
+                    reverse([-1, -1,  0,    0]),
+                    reverse([-1, -1, -1,    0]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd512.rmask.data{QUOTE})]
+                 static __rMASK_F64_512__: [u8; 9 + 8] = [
+                    0b00000000u8.reverse_bits(),
+                    0b00000000u8.reverse_bits(),
+                    0b00000000u8.reverse_bits(),
+                    0b00000000u8.reverse_bits(),
+                    0b00000000u8.reverse_bits(),
+                    0b00000001u8.reverse_bits(),
+                    0b00000011u8.reverse_bits(),
+                    0b00000111u8.reverse_bits(),
+                    0b00001111u8.reverse_bits(),
+                    0b00011111u8.reverse_bits(),
+                    0b00111111u8.reverse_bits(),
+                    0b01111111u8.reverse_bits(),
+                    0b11111111u8.reverse_bits(),
+                    0b11111111u8.reverse_bits(),
+                    0b11111111u8.reverse_bits(),
+                    0b11111111u8.reverse_bits(),
+                    0b11111111u8.reverse_bits(),
+                ];
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd128.rmask.data{QUOTE})]
+                 static __rMASK_C64_128__: [::core::arch::x86_64::__m128i; 2 + 8] = unsafe {{::core::mem::transmute([
+                    reverse([ 0, 0i64]),
+                    reverse([ 0,    0]),
+                    reverse([ 0,    0]),
+                    reverse([ 0,    0]),
+                    reverse([ 0,    0]),
+                    reverse([-1,   -1]),
+                    reverse([-1,   -1]),
+                    reverse([-1,   -1]),
+                    reverse([-1,   -1]),
+                    reverse([-1,   -1]),
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd256.rmask.data{QUOTE})]
+                 static __rMASK_C64_256__: [::core::arch::x86_64::__m256i; 3 + 8] = unsafe {{::core::mem::transmute([
+                    reverse([ 0,  0,  0, 0i64]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([-1, -1,  0,    0]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd512.rmask.data{QUOTE})]
+                 static __rMASK_C64_512__: [u8; 5 + 8] = [
+                    0b00000000u8.reverse_bits(),
+                    0b00000000u8.reverse_bits(),
+                    0b00000000u8.reverse_bits(),
+                    0b00000000u8.reverse_bits(),
+                    0b00000000u8.reverse_bits(),
+                    0b00000011u8.reverse_bits(),
+                    0b00001111u8.reverse_bits(),
+                    0b00111111u8.reverse_bits(),
+                    0b11111111u8.reverse_bits(),
+                    0b11111111u8.reverse_bits(),
+                    0b11111111u8.reverse_bits(),
+                    0b11111111u8.reverse_bits(),
+                    0b11111111u8.reverse_bits(),
+                ];
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd128.rmask.data{QUOTE})]
+                 static __rMASK_C32_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
+                    reverse([ 0,  0,  0, 0i32]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,    0]),
+                    reverse([-1, -1,  0,    0]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                    reverse([-1, -1, -1,   -1]),
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd256.rmask.data{QUOTE})]
+                 static __rMASK_C32_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
+                    reverse([ 0,  0,  0,  0,  0,  0,  0, 0i32]),
+                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
+                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
+                    reverse([-1, -1,  0,  0,  0,  0,  0,    0]),
+                    reverse([-1, -1, -1, -1,  0,  0,  0,    0]),
+                    reverse([-1, -1, -1, -1, -1, -1,  0,    0]),
+                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
+                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
+                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
+                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
+                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
+                ])}};
+
+                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd512.rmask.data{QUOTE})]
+                 static __rMASK_C32_512__: [u16; 9 + 8] = [
+                    0b0000000000000000u16.reverse_bits(),
+                    0b0000000000000000u16.reverse_bits(),
+                    0b0000000000000000u16.reverse_bits(),
+                    0b0000000000000000u16.reverse_bits(),
+                    0b0000000000000000u16.reverse_bits(),
+                    0b0000000000000011u16.reverse_bits(),
+                    0b0000000000001111u16.reverse_bits(),
+                    0b0000000000111111u16.reverse_bits(),
+                    0b0000000011111111u16.reverse_bits(),
+                    0b0000001111111111u16.reverse_bits(),
+                    0b0000111111111111u16.reverse_bits(),
+                    0b0011111111111111u16.reverse_bits(),
+                    0b1111111111111111u16.reverse_bits(),
+                    0b1111111111111111u16.reverse_bits(),
+                    0b1111111111111111u16.reverse_bits(),
+                    0b1111111111111111u16.reverse_bits(),
+                    0b1111111111111111u16.reverse_bits(),
                 ];
 
                 #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.flip.re.data{QUOTE})]

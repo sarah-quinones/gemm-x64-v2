@@ -1,4 +1,4 @@
-use core::ptr::null_mut;
+use core::ptr::{null, null_mut};
 
 use aligned_vec::avec;
 use diol::{Picoseconds, config::*, prelude::*};
@@ -288,6 +288,8 @@ fn bench_asm<const PACK_LHS: bool, const PACK_RHS: bool>(
                         cs: cs as isize * sizeof,
                         row_idx: null_mut(),
                         col_idx: null_mut(),
+                        diag_ptr: null(),
+                        diag_stride: 0,
                     },
                 )
             });
