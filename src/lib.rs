@@ -19,6 +19,15 @@ pub struct Position {
     pub col: usize,
 }
 
+const FLAGS_ACCUM: u32 = 0;
+const FLAGS_CONJ_LHS: u32 = 1;
+const FLAGS_CONJ_NEQ: u32 = 2;
+const FLAGS_LOWER: u32 = 3;
+const FLAGS_UPPER: u32 = 4;
+const FLAGS_32BIT_IDX: u32 = 5;
+const FLAGS_CPLX: u32 = 62;
+const FLAGS_ROWMAJOR: u32 = 63;
+
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
 pub struct MicrokernelInfo {
@@ -50,6 +59,53 @@ pub struct MillikernelInfo {
     pub rhs_cs: isize,
     pub packed_rhs_cs: isize,
     pub micro: MicrokernelInfo,
+}
+
+#[inline(always)]
+unsafe fn pack_rhs_imp<T: Copy>(
+    dst: *mut T,
+    src: *const (),
+    depth: usize,
+    stride: usize,
+    nr: usize,
+    rs: isize,
+    cs: isize,
+) {
+    for i in 0..depth {
+        unsafe {
+            let dst = dst.add(i * stride);
+            let src = src.byte_offset(i as isize * rs);
+
+            for j in 0..nr {
+                let dst = dst.add(j);
+                let src = src.byte_offset(j as isize * cs) as *const T;
+
+                *dst = *src;
+            }
+        }
+    }
+}
+
+#[inline(never)]
+unsafe fn pack_rhs(
+    dst: *mut (),
+    src: *const (),
+    depth: usize,
+    nr: usize,
+    rs: isize,
+    cs: isize,
+    sizeof: usize,
+) {
+    if !src.is_null() && src != dst as *const () {
+        unsafe {
+            match sizeof {
+                4 => pack_rhs_imp(dst as *mut f32, src, depth, nr, nr, rs, cs),
+                8 => pack_rhs_imp(dst as *mut [f32; 2], src, depth, nr, nr, rs, cs),
+                16 => pack_rhs_imp(dst as *mut [f64; 2], src, depth, nr, nr, rs, cs),
+                _ => unreachable!(),
+            }
+        }
+    }
 }
 
 #[inline(always)]
@@ -124,6 +180,10 @@ pub unsafe fn call_microkernel(
 
 pub unsafe fn millikernel_rowmajor(
     microkernel: unsafe extern "C" fn(),
+    pack: unsafe extern "C" fn(),
+    mr: usize,
+    nr: usize,
+    sizeof: usize,
 
     lhs: *const (),
     packed_lhs: *mut (),
@@ -143,6 +203,10 @@ pub unsafe fn millikernel_rowmajor(
     let mut lhs = lhs;
     let mut packed_lhs = packed_lhs;
 
+    let tril = milli.micro.flags & (1 << FLAGS_LOWER) != 0;
+    let triu = milli.micro.flags & (1 << FLAGS_UPPER) != 0;
+    let rectangular = !tril && !triu;
+
     loop {
         let rs = milli.micro.lhs_rs;
         unsafe {
@@ -154,17 +218,58 @@ pub unsafe fn millikernel_rowmajor(
 
             macro_rules! iter {
                 ($($lhs: ident)?) => {{
-                    (nrows, ncols) = call_microkernel(
-                        microkernel,
-                        lhs,
-                        packed_lhs,
-                        rhs,
-                        packed_rhs,
-                        nrows,
-                        ncols,
-                        &milli.micro,
-                        pos,
-                    );
+                    $({
+                        let _ = $lhs;
+                        if lhs != packed_lhs && !lhs.is_null() && (!milli.micro.diag_ptr.is_null() || milli.micro.lhs_rs != sizeof as isize) {
+                            pack_lhs(pack, milli, Ord::min(nrows, mr), packed_lhs, lhs, sizeof);
+                            lhs = null();
+                        }
+                    })*
+
+                    let row_chunk = Ord::min(nrows, mr);
+                    let col_chunk = Ord::min(ncols, nr);
+
+                    {
+                        let mut rhs = rhs;
+                        if rhs != packed_rhs && !rhs.is_null() {
+                            pack_rhs(
+                                packed_rhs,
+                                rhs,
+                                milli.micro.depth,
+                                col_chunk,
+                                milli.micro.rhs_rs,
+                                milli.micro.rhs_cs,
+                                sizeof,
+                            );
+                            rhs = null();
+                        }
+
+
+                        if rectangular || (tril && pos.row + mr > pos.col) || (triu && pos.col + col_chunk > pos.row) {
+                            call_microkernel(
+                                microkernel,
+                                lhs,
+                                packed_lhs,
+                                rhs,
+                                packed_rhs,
+                                row_chunk,
+                                col_chunk,
+                                &milli.micro,
+                                pos,
+                            );
+                        } else {
+                            if lhs != packed_lhs && !lhs.is_null() {
+                                pack_lhs(pack, milli, row_chunk, packed_lhs, lhs, sizeof);
+                            }
+                        }
+                    }
+
+                    pos.col += col_chunk;
+                    ncols -= col_chunk;
+                    if ncols == 0 {
+                        pos.row += row_chunk;
+                        nrows -= row_chunk;
+                    }
 
                     if !rhs.is_null() {
                         rhs = rhs.wrapping_byte_offset(milli.rhs_cs);
@@ -199,6 +304,10 @@ pub unsafe fn millikernel_rowmajor(
 
 pub unsafe fn millikernel_colmajor(
     microkernel: unsafe extern "C" fn(),
+    pack: unsafe extern "C" fn(),
+    mr: usize,
+    nr: usize,
+    sizeof: usize,
 
     lhs: *const (),
     packed_lhs: *mut (),
@@ -218,6 +327,12 @@ pub unsafe fn millikernel_colmajor(
     let mut rhs = rhs;
     let mut packed_rhs = packed_rhs;
 
+    let tril = milli.micro.flags & (1 << FLAGS_LOWER) != 0;
+    let triu = milli.micro.flags & (1 << FLAGS_UPPER) != 0;
+    let rectangular = !tril && !triu;
+
+    let mut j = 0;
+
     loop {
         let cs = milli.micro.rhs_cs;
         unsafe {
@@ -229,17 +344,57 @@ pub unsafe fn millikernel_colmajor(
 
             macro_rules! iter {
                 ($($rhs: ident)?) => {{
-                    (nrows, ncols) = call_microkernel(
-                        microkernel,
-                        lhs,
-                        packed_lhs,
-                        rhs,
-                        packed_rhs,
-                        nrows,
-                        ncols,
-                        &milli.micro,
-                        pos,
-                    );
+                    {
+                        let mut lhs = lhs;
+
+                        let row_chunk = Ord::min(nrows, mr);
+                        let col_chunk = Ord::min(ncols, nr);
+
+                        if lhs != packed_lhs && !lhs.is_null() && (!milli.micro.diag_ptr.is_null() || milli.micro.lhs_rs != sizeof as isize) {
+                            pack_lhs(pack, milli, row_chunk, packed_lhs, lhs, sizeof);
+                            lhs = null();
+                        }
+
+                        $({
+                            let _ = $rhs;
+                            if rhs != packed_rhs && !rhs.is_null() {
+                                pack_rhs(
+                                    packed_rhs,
+                                    rhs,
+                                    milli.micro.depth,
+                                    col_chunk,
+                                    milli.micro.rhs_rs,
+                                    milli.micro.rhs_cs,
+                                    sizeof,
+                                );
+                                rhs = null();
+                            }
+                        })*
+                        if rectangular || (tril && pos.row + mr > pos.col) || (triu && pos.col + col_chunk > pos.row) {
+                            call_microkernel(
+                                microkernel,
+                                lhs,
+                                packed_lhs,
+                                rhs,
+                                packed_rhs,
+                                row_chunk,
+                                col_chunk,
+                                &milli.micro,
+                                pos,
+                            );
+                        } else {
+                            if lhs != packed_lhs && !lhs.is_null() {
+                                pack_lhs(pack, milli, row_chunk, packed_lhs, lhs, sizeof);
+                            }
+                        }
+
+                        pos.row += row_chunk;
+                        nrows -= row_chunk;
+                        if nrows == 0 {
+                            pos.col += col_chunk;
+                            ncols -= col_chunk;
+                        }
+                    }
 
                     if !lhs.is_null() {
                         lhs = lhs.wrapping_byte_offset(milli.lhs_rs);
@@ -266,6 +421,7 @@ pub unsafe fn millikernel_colmajor(
             lhs = null();
         }
 
+        j += 1;
         if ncols == 0 {
             break;
         }
@@ -311,6 +467,10 @@ pub unsafe fn millikernel_par(
 
     let thd_id0 = thd_id % (n_threads0);
     let thd_id1 = thd_id / (n_threads0);
+
+    let tril = milli.micro.flags & (1 << FLAGS_LOWER) != 0;
+    let triu = milli.micro.flags & (1 << FLAGS_UPPER) != 0;
+    let rectangular = !tril && !triu;
 
     let i = mf * thd_id0;
     let j = nf * thd_id1;
@@ -367,27 +527,52 @@ pub unsafe fn millikernel_par(
             }
 
             unsafe {
-                if lhs != packed_lhs && !lhs.is_null() && milli.micro.lhs_cs == sizeof as isize {
-                    pack_row_major(pack, milli, row_chunk, packed_lhs, lhs);
+                if lhs != packed_lhs
+                    && !lhs.is_null()
+                    && (!milli.micro.diag_ptr.is_null() || milli.micro.lhs_rs != sizeof as isize)
+                {
+                    pack_lhs(pack, milli, row_chunk, packed_lhs, lhs, sizeof);
 
                     lhs = null();
                     pack_lhs_job[i].store(2, Ordering::Release);
                 }
+                if rhs != packed_rhs && !rhs.is_null() {
+                    pack_rhs(
+                        packed_rhs,
+                        rhs,
+                        milli.micro.depth,
+                        col_chunk,
+                        milli.micro.rhs_rs,
+                        milli.micro.rhs_cs,
+                        sizeof,
+                    );
+                    rhs = null();
+                    pack_rhs_job[j].store(2, Ordering::Release);
+                }
 
-                call_microkernel(
-                    microkernel,
-                    lhs,
-                    packed_lhs,
-                    rhs,
-                    packed_rhs,
-                    row_chunk,
-                    col_chunk,
-                    &milli.micro,
-                    &mut Position {
-                        row: row + pos.row,
-                        col: col + pos.col,
-                    },
-                );
+                if rectangular
+                    || (tril && pos.row + mr > pos.col)
+                    || (triu && pos.col + col_chunk > pos.row)
+                {
+                    call_microkernel(
+                        microkernel,
+                        lhs,
+                        packed_lhs,
+                        rhs,
+                        packed_rhs,
+                        row_chunk,
+                        col_chunk,
+                        &milli.micro,
+                        &mut Position {
+                            row: row + pos.row,
+                            col: col + pos.col,
+                        },
+                    );
+                } else {
+                    if lhs != packed_lhs && !lhs.is_null() {
+                        pack_lhs(pack, milli, row_chunk, packed_lhs, lhs, sizeof);
+                    }
+                }
             }
 
             if !lhs.is_null() && lhs != packed_lhs {
@@ -400,59 +585,132 @@ pub unsafe fn millikernel_par(
     }
 }
 
-unsafe fn pack_row_major(
+unsafe fn pack_lhs(
     pack: unsafe extern "C" fn(),
     milli: &MillikernelInfo,
     row_chunk: usize,
     packed_lhs: *mut (),
     lhs: *const (),
+    sizeof: usize,
 ) {
     unsafe {
-        core::arch::asm! {
-            "call r10",
-            in("r10") pack,
-            in("rax") lhs,
-            in("r15") packed_lhs,
-            in("r8") row_chunk,
-            in("rsi") &milli.micro,
+        {
+            let mut dst_cs = row_chunk;
+            core::arch::asm! {
+                "call r10",
+                in("r10") pack,
+                in("rax") lhs,
+                in("r15") packed_lhs,
+                inout("r8") dst_cs,
+                in("rsi") &milli.micro,
 
-            out("zmm0") _,
-            out("zmm1") _,
-            out("zmm2") _,
-            out("zmm3") _,
-            out("zmm4") _,
-            out("zmm5") _,
-            out("zmm6") _,
-            out("zmm7") _,
-            out("zmm8") _,
-            out("zmm9") _,
-            out("zmm10") _,
-            out("zmm11") _,
-            out("zmm12") _,
-            out("zmm13") _,
-            out("zmm14") _,
-            out("zmm15") _,
-            out("zmm16") _,
-            out("zmm17") _,
-            out("zmm18") _,
-            out("zmm19") _,
-            out("zmm20") _,
-            out("zmm21") _,
-            out("zmm22") _,
-            out("zmm23") _,
-            out("zmm24") _,
-            out("zmm25") _,
-            out("zmm26") _,
-            out("zmm27") _,
-            out("zmm28") _,
-            out("zmm29") _,
-            out("zmm30") _,
-            out("zmm31") _,
-            out("k1") _,
-            out("k2") _,
-            out("k3") _,
-            out("k4") _,
-        };
+                out("zmm0") _,
+                out("zmm1") _,
+                out("zmm2") _,
+                out("zmm3") _,
+                out("zmm4") _,
+                out("zmm5") _,
+                out("zmm6") _,
+                out("zmm7") _,
+                out("zmm8") _,
+                out("zmm9") _,
+                out("zmm10") _,
+                out("zmm11") _,
+                out("zmm12") _,
+                out("zmm13") _,
+                out("zmm14") _,
+                out("zmm15") _,
+                out("zmm16") _,
+                out("zmm17") _,
+                out("zmm18") _,
+                out("zmm19") _,
+                out("zmm20") _,
+                out("zmm21") _,
+                out("zmm22") _,
+                out("zmm23") _,
+                out("zmm24") _,
+                out("zmm25") _,
+                out("zmm26") _,
+                out("zmm27") _,
+                out("zmm28") _,
+                out("zmm29") _,
+                out("zmm30") _,
+                out("zmm31") _,
+                out("k1") _,
+                out("k2") _,
+                out("k3") _,
+                out("k4") _,
+            };
+
+            if milli.micro.lhs_rs != sizeof as isize && milli.micro.lhs_cs != sizeof as isize {
+                for j in 0..milli.micro.depth {
+                    let dst = packed_lhs.byte_add(j * dst_cs);
+                    let src = lhs.byte_offset(j as isize * milli.micro.lhs_cs);
+                    let diag_ptr = milli
+                        .micro
+                        .diag_ptr
+                        .byte_offset(j as isize * milli.micro.diag_stride);
+
+                    if sizeof == 4 {
+                        let dst = dst as *mut f32;
+                        let src = src as *const f32;
+                        for i in 0..row_chunk {
+                            let dst = dst.add(i);
+                            let src = src.byte_offset(i as isize * milli.micro.lhs_rs);
+
+                            if diag_ptr.is_null() {
+                                *dst = *src;
+                            } else {
+                                *dst = *src * *(diag_ptr as *const f32);
+                            }
+                        }
+                    } else if sizeof == 16 {
+                        let dst = dst as *mut [f64; 2];
+                        let src = src as *const [f64; 2];
+                        for i in 0..row_chunk {
+                            let dst = dst.add(i);
+                            let src = src.byte_offset(i as isize * milli.micro.lhs_rs);
+
+                            if diag_ptr.is_null() {
+                                *dst = *src;
+                            } else {
+                                (*dst)[0] = (*src)[0] * *(diag_ptr as *const f64);
+                                (*dst)[1] = (*src)[1] * *(diag_ptr as *const f64);
+                            }
+                        }
+                    } else {
+                        if (milli.micro.flags >> 62) & 1 == 1 {
+                            let dst = dst as *mut [f32; 2];
+                            let src = src as *const [f32; 2];
+                            for i in 0..row_chunk {
+                                let dst = dst.add(i);
+                                let src = src.byte_offset(i as isize * milli.micro.lhs_rs);
+
+                                if diag_ptr.is_null() {
+                                    *dst = *src;
+                                } else {
+                                    (*dst)[0] = (*src)[0] * *(diag_ptr as *const f32);
+                                    (*dst)[1] = (*src)[1] * *(diag_ptr as *const f32);
+                                }
+                            }
+                        } else {
+                            let dst = dst as *mut f64;
+                            let src = src as *const f64;
+                            for i in 0..row_chunk {
+                                let dst = dst.add(i);
+                                let src = src.byte_offset(i as isize * milli.micro.lhs_rs);
+
+                                if diag_ptr.is_null() {
+                                    *dst = *src;
+                                } else {
+                                    *dst = *src * *(diag_ptr as *const f64);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -478,7 +736,11 @@ pub unsafe trait Millikernel {
     );
 }
 
-struct Milli;
+struct Milli {
+    mr: usize,
+    nr: usize,
+    sizeof: usize,
+}
 struct MilliPar<'a, 'b> {
     mr: usize,
     nr: usize,
@@ -519,6 +781,10 @@ unsafe impl Millikernel for Milli {
                 millikernel_colmajor
             })(
                 microkernel,
+                pack,
+                self.mr,
+                self.nr,
+                self.sizeof,
                 lhs,
                 packed_lhs,
                 rhs,
@@ -736,6 +1002,8 @@ unsafe fn kernel_imp(
         usize,
         bool,
         bool,
+        bool,
+        bool,
     ); 16] = const {
         [(
             null(),
@@ -752,11 +1020,14 @@ unsafe fn kernel_imp(
             0,
             false,
             false,
+            false,
+            false,
         ); 16]
     };
 
     stack[0] = (
-        lhs, packed_lhs, rhs, packed_rhs, row, col, nrows, ncols, 0, 0, 0, 0, false, false,
+        lhs, packed_lhs, rhs, packed_rhs, row, col, nrows, ncols, 0, 0, 0, 0, false, false, false,
+        false,
     );
 
     let mut pos = pos;
@@ -803,7 +1074,11 @@ unsafe fn kernel_imp(
             jj,
             is_packed_lhs,
             is_packed_rhs,
+            row_rev,
+            col_rev,
         ) = stack[depth];
+        let row_rev = false;
+        let col_rev = false;
 
         if depth + 1 == max_depth {
             let mut lhs = lhs;
@@ -837,7 +1112,7 @@ unsafe fn kernel_imp(
             while depth > 0 {
                 depth -= 1;
 
-                let (_, _, _, _, _, _, nrows, ncols, i, j, ii, jj, _, _) = &mut stack[depth];
+                let (_, _, _, _, _, _, nrows, ncols, i, j, ii, jj, _, _, _, _) = &mut stack[depth];
 
                 let col_chunk = col_chunk[depth];
                 let row_chunk = row_chunk[depth];
@@ -893,6 +1168,38 @@ unsafe fn kernel_imp(
             let prhs_cs = packed_rhs_cs[depth];
             let plhs_rs = packed_lhs_rs[depth];
 
+            let last_row_chunk = if nrows == 0 {
+                0
+            } else {
+                ((nrows - 1) % row_chunk) + 1
+            };
+
+            let last_col_chunk = if ncols == 0 {
+                0
+            } else {
+                ((ncols - 1) % col_chunk) + 1
+            };
+
+            let (i, ii) = if row_rev {
+                (
+                    nrows - last_row_chunk - i,
+                    nrows.div_ceil(row_chunk) - 1 - ii,
+                )
+            } else {
+                (i, ii)
+            };
+
+            let (j, jj) = if col_rev {
+                (
+                    ncols - last_col_chunk - j,
+                    ncols.div_ceil(col_chunk) - 1 - jj,
+                )
+            } else {
+                (j, jj)
+            };
+            assert!(i as isize >= 0);
+            assert!(j as isize >= 0);
+
             let j_chunk = Ord::min(col_chunk, ncols - j);
             let i_chunk = Ord::min(row_chunk, nrows - i);
 
@@ -912,6 +1219,8 @@ unsafe fn kernel_imp(
                 0,
                 is_packed_lhs || (j > 0 && packed_lhs_rs[depth] != 0),
                 is_packed_rhs || (i > 0 && packed_rhs_cs[depth] != 0),
+                jj % 2 == 1,
+                ii % 2 == 1,
             );
             continue;
         }
@@ -1032,7 +1341,7 @@ pub unsafe fn kernel(
 ) {
     unsafe {
         kernel_imp(
-            &mut Milli,
+            &mut Milli { mr, nr, sizeof },
             microkernel,
             pack,
             mr,
@@ -1074,7 +1383,7 @@ mod tests_f64 {
         let len = 64 / size_of::<f64>();
 
         for pack_lhs in [false, true] {
-            for pack_rhs in [false, true] {
+            for pack_rhs in [false] {
                 for alpha in [1.0.into(), 0.0.into(), 2.5.into()] {
                     let alpha: f64 = alpha;
                     for m in 1..=48usize {
@@ -1112,6 +1421,10 @@ mod tests_f64 {
                                 unsafe {
                                     millikernel_colmajor(
                                         F64_SIMD512x4[3],
+                                        F64_SIMDpack_512[0],
+                                        48,
+                                        4,
+                                        8,
                                         lhs.as_ptr() as _,
                                         if pack_lhs {
                                             packed_lhs.as_mut_ptr() as _
@@ -1203,7 +1516,7 @@ mod tests_f64 {
         }
 
         for pack_lhs in [false, true] {
-            for pack_rhs in [false, true] {
+            for pack_rhs in [false] {
                 let dst = &mut *avec![0.0; cs * n];
                 let packed_lhs = &mut *avec![0.0f64; m.next_multiple_of(8) * k];
                 let packed_rhs =
@@ -1296,7 +1609,7 @@ mod tests_c64 {
         let len = 64 / size_of::<c64>();
 
         for pack_lhs in [false, true] {
-            for pack_rhs in [false, true] {
+            for pack_rhs in [false] {
                 for alpha in [
                     1.0.into(),
                     0.0.into(),
@@ -1349,6 +1662,10 @@ mod tests_c64 {
                                         unsafe {
                                             millikernel_colmajor(
                                                 C64_SIMD512x4[3],
+                                                C64_SIMDpack_512[0],
+                                                24,
+                                                4,
+                                                16,
                                                 lhs.as_ptr() as _,
                                                 if pack_lhs {
                                                     packed_lhs.as_mut_ptr() as _
@@ -1425,7 +1742,7 @@ mod tests_f32 {
         let len = 64 / size_of::<f32>();
 
         for pack_lhs in [false, true] {
-            for pack_rhs in [false, true] {
+            for pack_rhs in [false] {
                 for alpha in [1.0.into(), 0.0.into(), 2.5.into()] {
                     let alpha: f32 = alpha;
                     for m in 1..=96usize {
@@ -1463,6 +1780,10 @@ mod tests_f32 {
                                 unsafe {
                                     millikernel_rowmajor(
                                         F32_SIMD512x4[3],
+                                        F32_SIMDpack_512[0],
+                                        96,
+                                        4,
+                                        4,
                                         lhs.as_ptr() as _,
                                         if pack_lhs {
                                             packed_lhs.as_mut_ptr() as _
@@ -1554,7 +1875,7 @@ mod tests_f32 {
         }
 
         for pack_lhs in [false, true] {
-            for pack_rhs in [false, true] {
+            for pack_rhs in [false] {
                 let dst = &mut *avec![0.0; cs * n];
                 let packed_lhs = &mut *avec![0.0f32; m.next_multiple_of(16) * k];
                 let packed_rhs =
@@ -1648,7 +1969,7 @@ mod tests_c32 {
         let len = 64 / size_of::<c32>();
 
         for pack_lhs in [false, true] {
-            for pack_rhs in [false, true] {
+            for pack_rhs in [false] {
                 for alpha in [
                     1.0.into(),
                     0.0.into(),
@@ -1662,6 +1983,9 @@ mod tests_c32 {
                                 for conj_lhs in [false, true] {
                                     for conj_rhs in [false, true] {
                                         for diag_scale in [false, true] {
+                                            if diag_scale && !pack_lhs {
+                                                continue;
+                                            }
                                             let conj_different = conj_lhs != conj_rhs;
 
                                             let acs = m.next_multiple_of(len);
@@ -1712,6 +2036,10 @@ mod tests_c32 {
                                             unsafe {
                                                 millikernel_colmajor(
                                                     C32_SIMD512x4[3],
+                                                    C32_SIMDpack_512[0],
+                                                    48,
+                                                    4,
+                                                    8,
                                                     lhs.as_ptr() as _,
                                                     if pack_lhs {
                                                         packed_lhs.as_mut_ptr() as _
@@ -1750,7 +2078,11 @@ mod tests_c32 {
                                                             } else {
                                                                 null()
                                                             },
-                                                            diag_stride: size_of::<f32>() as isize,
+                                                            diag_stride: if diag_scale {
+                                                                size_of::<f32>() as isize
+                                                            } else {
+                                                                0
+                                                            },
                                                         },
                                                     },
                                                     &mut Position { row: 0, col: 0 },
@@ -1795,7 +2127,7 @@ mod tests_c32_lower {
         let len = 64 / size_of::<c32>();
 
         for pack_lhs in [false, true] {
-            for pack_rhs in [false, true] {
+            for pack_rhs in [false] {
                 for alpha in [
                     1.0.into(),
                     0.0.into(),
@@ -1809,6 +2141,9 @@ mod tests_c32_lower {
                                 for conj_lhs in [false, true] {
                                     for conj_rhs in [false, true] {
                                         for diag_scale in [false, true] {
+                                            if diag_scale && !pack_lhs {
+                                                continue;
+                                            }
                                             let conj_different = conj_lhs != conj_rhs;
 
                                             let acs = m.next_multiple_of(len);
@@ -1862,6 +2197,10 @@ mod tests_c32_lower {
                                             unsafe {
                                                 millikernel_colmajor(
                                                     C32_SIMD512x4[3],
+                                                    C32_SIMDpack_512[0],
+                                                    48,
+                                                    4,
+                                                    8,
                                                     lhs.as_ptr() as _,
                                                     if pack_lhs {
                                                         packed_lhs.as_mut_ptr() as _
@@ -1901,7 +2240,11 @@ mod tests_c32_lower {
                                                             } else {
                                                                 null()
                                                             },
-                                                            diag_stride: size_of::<f32>() as isize,
+                                                            diag_stride: if diag_scale {
+                                                                size_of::<f32>() as isize
+                                                            } else {
+                                                                0
+                                                            },
                                                         },
                                                     },
                                                     &mut Position { row: 0, col: 0 },
@@ -1946,7 +2289,7 @@ mod tests_c32_upper {
         let len = 64 / size_of::<c32>();
 
         for pack_lhs in [false, true] {
-            for pack_rhs in [false, true] {
+            for pack_rhs in [false] {
                 for alpha in [
                     1.0.into(),
                     0.0.into(),
@@ -1960,6 +2303,9 @@ mod tests_c32_upper {
                                 for conj_lhs in [false, true] {
                                     for conj_rhs in [false, true] {
                                         for diag_scale in [false, true] {
+                                            if diag_scale && !pack_lhs {
+                                                continue;
+                                            }
                                             let conj_different = conj_lhs != conj_rhs;
 
                                             let acs = m.next_multiple_of(len);
@@ -2013,6 +2359,10 @@ mod tests_c32_upper {
                                             unsafe {
                                                 millikernel_colmajor(
                                                     C32_SIMD512x4[3],
+                                                    C32_SIMDpack_512[0],
+                                                    48,
+                                                    4,
+                                                    8,
                                                     lhs.as_ptr() as _,
                                                     if pack_lhs {
                                                         packed_lhs.as_mut_ptr() as _
@@ -2052,7 +2402,11 @@ mod tests_c32_upper {
                                                             } else {
                                                                 null()
                                                             },
-                                                            diag_stride: size_of::<f32>() as isize,
+                                                            diag_stride: if diag_scale {
+                                                                size_of::<f32>() as isize
+                                                            } else {
+                                                                0
+                                                            },
                                                         },
                                                     },
                                                     &mut Position { row: 0, col: 0 },
@@ -2257,7 +2611,7 @@ mod tests_c32_gather_scatter {
         let len = 64 / size_of::<c32>();
 
         for pack_lhs in [false, true] {
-            for pack_rhs in [false, true] {
+            for pack_rhs in [false] {
                 for alpha in [
                     1.0.into(),
                     0.0.into(),
@@ -2271,6 +2625,10 @@ mod tests_c32_gather_scatter {
                                 for conj_lhs in [false, true] {
                                     for conj_rhs in [false, true] {
                                         for diag_scale in [false, true] {
+                                            if diag_scale && !pack_lhs {
+                                                continue;
+                                            }
+
                                             let m = 2usize;
                                             let cs = m;
                                             let conj_different = conj_lhs != conj_rhs;
@@ -2327,6 +2685,10 @@ mod tests_c32_gather_scatter {
                                             unsafe {
                                                 millikernel_colmajor(
                                                     C32_SIMD512x4[3],
+                                                    C32_SIMDpack_512[0],
+                                                    48,
+                                                    4,
+                                                    8,
                                                     lhs.as_ptr() as _,
                                                     if pack_lhs {
                                                         packed_lhs.as_mut_ptr() as _
@@ -2366,7 +2728,11 @@ mod tests_c32_gather_scatter {
                                                             } else {
                                                                 null()
                                                             },
-                                                            diag_stride: size_of::<f32>() as isize,
+                                                            diag_stride: if diag_scale {
+                                                                size_of::<f32>() as isize
+                                                            } else {
+                                                                0
+                                                            },
                                                         },
                                                     },
                                                     &mut Position { row: 0, col: 0 },
@@ -2400,7 +2766,7 @@ mod tests_c32_gather_scatter {
         let len = 64 / size_of::<c32>();
 
         for pack_lhs in [false, true] {
-            for pack_rhs in [false, true] {
+            for pack_rhs in [false] {
                 for alpha in [
                     1.0.into(),
                     0.0.into(),
@@ -2414,6 +2780,9 @@ mod tests_c32_gather_scatter {
                                 for conj_lhs in [false, true] {
                                     for conj_rhs in [false, true] {
                                         for diag_scale in [false, true] {
+                                            if diag_scale && !pack_lhs {
+                                                continue;
+                                            }
                                             let m = 2usize;
                                             let cs = m;
                                             let conj_different = conj_lhs != conj_rhs;
@@ -2473,6 +2842,10 @@ mod tests_c32_gather_scatter {
                                             unsafe {
                                                 millikernel_colmajor(
                                                     C32_SIMD512x4[3],
+                                                    C32_SIMDpack_512[0],
+                                                    48,
+                                                    4,
+                                                    8,
                                                     lhs.as_ptr() as _,
                                                     if pack_lhs {
                                                         packed_lhs.as_mut_ptr() as _
@@ -2513,7 +2886,173 @@ mod tests_c32_gather_scatter {
                                                             } else {
                                                                 null()
                                                             },
-                                                            diag_stride: size_of::<f32>() as isize,
+                                                            diag_stride: if diag_scale {
+                                                                size_of::<f32>() as isize
+                                                            } else {
+                                                                0
+                                                            },
+                                                        },
+                                                    },
+                                                    &mut Position { row: 0, col: 0 },
+                                                )
+                                            };
+                                            let mut i = 0;
+                                            for (&target, &dst) in core::iter::zip(&*target, &*dst)
+                                            {
+                                                if !((target - dst).norm_sqr().sqrt() < 1e-4) {
+                                                    dbg!(i / cs, i % cs, target, dst);
+                                                    panic!();
+                                                }
+                                                i += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_avx512_microkernel3() {
+        let rng = &mut StdRng::seed_from_u64(0);
+
+        let sizeof = size_of::<c32>() as isize;
+        let len = 64 / size_of::<c32>();
+
+        for pack_lhs in [true] {
+            for pack_rhs in [false] {
+                for alpha in [
+                    1.0.into(),
+                    0.0.into(),
+                    c32::new(0.0, 3.5),
+                    c32::new(2.5, 3.5),
+                ] {
+                    let alpha: c32 = alpha;
+                    for m in 1..=127usize {
+                        for n in [8].into_iter().chain(1..=4usize).chain([8]) {
+                            for cs in [m, m.next_multiple_of(len)] {
+                                for conj_lhs in [false, true] {
+                                    for conj_rhs in [false, true] {
+                                        for diag_scale in [false, true] {
+                                            if diag_scale && !pack_lhs {
+                                                continue;
+                                            }
+                                            let m = 2usize;
+                                            let cs = m;
+                                            let conj_different = conj_lhs != conj_rhs;
+                                            let idx = (0..Ord::max(m, n))
+                                                .map(|i| 2 * i as u32)
+                                                .collect::<Vec<_>>();
+
+                                            let acs = m.next_multiple_of(len);
+                                            let k = 1usize;
+
+                                            let packed_lhs: &mut [c32] =
+                                                &mut *avec![0.0.into(); acs * k];
+                                            let packed_rhs: &mut [c32] =
+                                                &mut *avec![0.0.into(); n.next_multiple_of(4) * k];
+                                            let lhs: &mut [c32] =
+                                                &mut *avec![0.0.into(); 2 * cs * k];
+                                            let rhs: &mut [c32] = &mut *avec![0.0.into(); n * k];
+                                            let dst: &mut [c32] =
+                                                &mut *avec![0.0.into(); 2 * cs * n];
+                                            let target: &mut [c32] =
+                                                &mut *avec![0.0.into(); 2 * cs * n];
+
+                                            let diag: &mut [f32] = &mut *avec![0.0.into(); k];
+
+                                            rng.fill(cast_slice_mut::<c32, f32>(lhs));
+                                            rng.fill(cast_slice_mut::<c32, f32>(rhs));
+                                            rng.fill(diag);
+
+                                            for i in 0..m {
+                                                for j in 0..n {
+                                                    if i > j {
+                                                        continue;
+                                                    }
+                                                    let target = &mut target[2 * (i + cs * j)];
+                                                    let mut acc: c32 = 0.0.into();
+                                                    for depth in 0..k {
+                                                        let mut l = lhs[2 * (i + cs * depth)];
+                                                        let mut r = rhs[depth + k * j];
+                                                        let d = diag[depth];
+
+                                                        if conj_lhs {
+                                                            l = l.conj();
+                                                        }
+                                                        if conj_rhs {
+                                                            r = r.conj();
+                                                        }
+
+                                                        if diag_scale {
+                                                            acc += d * l * r;
+                                                        } else {
+                                                            acc += l * r;
+                                                        }
+                                                    }
+                                                    *target = acc * alpha + *target;
+                                                }
+                                            }
+
+                                            unsafe {
+                                                millikernel_colmajor(
+                                                    C32_SIMD512x4[3],
+                                                    C32_SIMDpack_512[0],
+                                                    48,
+                                                    4,
+                                                    8,
+                                                    lhs.as_ptr() as _,
+                                                    if pack_lhs {
+                                                        packed_lhs.as_mut_ptr() as _
+                                                    } else {
+                                                        lhs.as_ptr() as _
+                                                    },
+                                                    rhs.as_ptr() as _,
+                                                    if pack_rhs {
+                                                        packed_rhs.as_mut_ptr() as _
+                                                    } else {
+                                                        rhs.as_ptr() as _
+                                                    },
+                                                    m,
+                                                    n,
+                                                    &mut MillikernelInfo {
+                                                        lhs_rs: 48 * sizeof,
+                                                        packed_lhs_rs: 48 * sizeof * k as isize,
+                                                        rhs_cs: 4 * sizeof * k as isize,
+                                                        packed_rhs_cs: 4 * sizeof * k as isize,
+                                                        micro: MicrokernelInfo {
+                                                            flags: ((conj_lhs as usize)
+                                                                << FLAGS_CONJ_LHS)
+                                                                | ((conj_different as usize)
+                                                                    << FLAGS_CONJ_NEQ)
+                                                                | (1 << FLAGS_UPPER)
+                                                                | (1 << FLAGS_32BIT_IDX)
+                                                                | (1 << FLAGS_CPLX),
+                                                            depth: k,
+                                                            lhs_rs: 2 * sizeof,
+                                                            lhs_cs: 2 * cs as isize * sizeof,
+                                                            rhs_rs: 1 * sizeof,
+                                                            rhs_cs: k as isize * sizeof,
+                                                            alpha: &raw const alpha as _,
+                                                            ptr: dst.as_mut_ptr() as _,
+                                                            rs: sizeof,
+                                                            cs: cs as isize * sizeof,
+                                                            row_idx: idx.as_ptr() as _,
+                                                            col_idx: idx.as_ptr() as _,
+                                                            diag_ptr: if diag_scale {
+                                                                diag.as_ptr() as *const ()
+                                                            } else {
+                                                                null()
+                                                            },
+                                                            diag_stride: if diag_scale {
+                                                                size_of::<f32>() as isize
+                                                            } else {
+                                                                0
+                                                            },
                                                         },
                                                     },
                                                     &mut Position { row: 0, col: 0 },

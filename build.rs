@@ -93,20 +93,7 @@ macro_rules! asm {
 
         let code = &mut *ctx!().code.borrow_mut();
 
-        let old = code.len();
-        ::interpol::write!(code, "    ").unwrap();
-        ::interpol::write!(code, $code).unwrap();
-        let new = code.len();
-
-        let mut len = new - old;
-
-        while len < 40 {
-            *code += " ";
-            len += 1;
-        }
-        *code += "// ";
-
-        ::interpol::writeln!(code, $comment).unwrap();
+        ::interpol::writeln!(code, $code).unwrap();
     }};
 }
 
@@ -889,12 +876,12 @@ impl Ctx {
     }
 
     #[track_caller]
-    fn reg(&self, name: &str) -> Reg {
+    fn reg(&self, _: &str) -> Reg {
         setup!(self);
 
         for &reg in Reg::ALL {
             if !self[reg].get() {
-                asm!("push {reg}", "save before reg alloc `{name}`");
+                asm!("push {reg}");
                 self[reg].set(true);
                 return reg;
             }
@@ -903,22 +890,20 @@ impl Ctx {
         panic!();
     }
 
-    fn reg_drop(&self, reg: Reg, name: &str) {
+    fn reg_drop(&self, reg: Reg, _: &str) {
         setup!(self);
 
         self[reg].set(false);
-        asm!("pop {reg}", "restore after reg dealloc `{name}`");
+        asm!("pop {reg}");
     }
 
-    fn label(&self, name: &str) -> usize {
-        let _ = name;
+    fn label(&self, _: &str) -> usize {
         let label = self.label.get();
         self.label.set(label + 1);
         label
     }
 
-    fn label_drop(&self, label: usize, name: &str) {
-        let _ = name;
+    fn label_drop(&self, label: usize, _: &str) {
         self.label.set(label);
     }
 }
@@ -1331,15 +1316,17 @@ impl Target {
     }
 
     fn vbroadcast(self, dst: isize, src: Addr) -> String {
-        let instr = if self.is_scalar() {
-            return self.vload(dst, src);
-        } else if (self.ty, self.simd) == (Ty::F64, Simd::_128) {
+        let this = self.real();
+
+        let instr = if this.is_scalar() {
+            return this.vload(dst, src);
+        } else if (this.ty, this.simd) == (Ty::F64, Simd::_128) {
             format!("vmovddup")
         } else {
-            format!("vbroadcasts{self.ty.suffix()}")
+            format!("vbroadcasts{this.ty.suffix()}")
         };
 
-        format!("{instr} {self.simd.reg()}{dst}, {src}")
+        format!("{instr} {this.simd.reg()}{dst}, {src}")
     }
 
     fn transpose(self, n_regs: usize) -> (String, usize, bool) {
@@ -1611,7 +1598,7 @@ impl Target {
         (ctx.code.borrow().clone(), t, in_t)
     }
 
-    fn pack_row_major(self, m: isize) -> (String, String) {
+    fn pack_lhs(self, m: isize) -> (String, String) {
         let Self { ty, simd } = self;
         let bits = simd.sizeof() * 8;
 
@@ -1622,7 +1609,7 @@ impl Target {
         let dst = r15;
         let nrows = r8;
         let info = rsi;
-        let prefix = format!("{*PREFIX} gemm.pack.rowmajor.b{ty.sizeof() * 8}.simd{bits}");
+        let prefix = format!("{*PREFIX} gemm.pack.rowmajor.{ty}.simd{bits}");
 
         ctx[rsp].set(true);
         ctx[src].set(true);
@@ -1630,9 +1617,11 @@ impl Target {
         ctx[nrows].set(true);
         ctx[info].set(true);
 
+        let dst_cs = simd.sizeof() * m;
+        let need_mask = simd.sizeof() >= 16;
+
         let main = {
             func!("{prefix} {suffix}");
-
             {
                 label!({
                     let good;
@@ -1645,120 +1634,284 @@ impl Target {
                 label!(good = _);
             }
             {
+                label!({
+                    let cont;
+                });
+                cmp!([info + INFO_LHS_RS], ty.sizeof());
+                jz!(cont);
+
+                cmp!([info + INFO_LHS_CS], ty.sizeof());
+                jz!(cont);
+
+                mov!(nrows, m * simd.sizeof());
+                asm!("ret");
+
+                label!(cont = _);
+            }
+
+            {
                 alloca!(src);
                 alloca!(dst);
                 reg!(src_rs);
                 reg!(depth);
                 reg!(depth_down);
+                reg!(diag_ptr);
+                reg!(diag_stride);
 
-                mov!(src_rs, [info + INFO_LHS_RS]);
+                label!({
+                    let colmajor;
+                    let rowmajor;
+                    let end;
+                });
+
                 mov!(depth, [info + INFO_DEPTH]);
+                mov!(diag_ptr, [info + INFO_DIAG_PTR]);
+                mov!(diag_stride, [info + INFO_DIAG_STRIDE]);
 
-                let min_nrows = (m - 1) * self.len();
-                let dst_cs = simd.sizeof() * m;
+                test!(depth, depth);
+                jz!(end);
 
-                for j in 0..simd.num_regs() {
-                    vxor!(zmm(j), zmm(j), zmm(j));
-                }
+                cmp!([info + INFO_LHS_RS], ty.sizeof());
+                jz!(colmajor);
 
-                let mut len = self.len();
+                cmp!([info + INFO_LHS_CS], ty.sizeof());
+                jz!(rowmajor);
 
-                while len >= 1 {
+                abort!();
+                label!(colmajor = _);
+                {
                     label!({
                         let loop_begin;
-                        let loop_end;
+                        let loop_begin_d;
                     });
 
-                    assert!(len <= 16);
+                    let src_cs = src_rs;
+                    let mask_ptr = depth_down;
 
-                    let target = Target {
-                        ty,
-                        simd: match len * ty.sizeof() * 8 {
-                            512 => Simd::_512,
-                            256 => Simd::_256,
-                            128 => Simd::_128,
-                            64 => Simd::_64,
-                            32 => Simd::_32,
-                            _ => unreachable!(),
-                        },
-                    };
+                    if need_mask {
+                        reg!(tmp);
+                        {
+                            let prefix = format!("{*PREFIX} gemm.microkernel.{ty}.simd{bits}");
 
-                    mov!(depth_down, depth);
-                    and!(depth_down, -len as i8);
-                    sub!(depth, depth_down);
+                            lea!(
+                                tmp,
+                                [rip + &format!("{prefix}.mask.data") + 4 * self.mask_sizeof()]
+                            );
+                        }
+                        if self.mask_sizeof() <= 8 {
+                            lea!(
+                                mask_ptr,
+                                [tmp + nrows * self.mask_sizeof()
+                                    + -(m - 1) * self.len() * self.mask_sizeof()]
+                            );
+                        } else {
+                            lea!(mask_ptr, [tmp + nrows * 8 + -(m - 1) * self.len() * 8]);
+                            lea!(mask_ptr, [tmp + nrows * 8 + -(m - 1) * self.len() * 8]);
+                        }
+                        kmov!(k(2), [mask_ptr]);
+                    }
+                    mov!(src_cs, [info + INFO_LHS_CS]);
 
-                    test!(depth_down, depth_down);
-                    jz!(loop_end);
+                    test!(diag_ptr, diag_ptr);
+                    jnz!(loop_begin_d);
+
                     label!(loop_begin = _);
-                    {
-                        alloca!(src);
-                        alloca!(nrows);
-
-                        for i in 0..min_nrows / len {
-                            for j in 0..len {
-                                asm!("{target.vload(j, Addr::from(src))}");
-                                add!(src, src_rs);
+                    for i in 0..m {
+                        if i + 1 == m {
+                            if need_mask {
+                                vmov!(zmm(0)[2], [src + i * simd.sizeof()]);
+                            } else {
+                                abort!();
                             }
-
-                            let (c, t, in_t) = self.transpose(len as _);
-                            *ctx.code.borrow_mut() += &c;
-
-                            for j in 0..len {
-                                asm!(
-                                    "{
-                                        target.vstore(
-                                            Addr::from(dst + (i * len * ty.sizeof() + j * dst_cs)),
-                                            if in_t { t as isize - j } else { j },
-                                        )
-                                    }"
-                                );
-                            }
+                        } else {
+                            vmov!(zmm(0), [src + i * simd.sizeof()]);
                         }
-                        let mut i = min_nrows / len;
-                        while i < m * self.len() / len {
-                            label!({
-                                let end;
-                            });
-
-                            for j in 0..len {
-                                cmp!(nrows, i * len + j);
-                                jz!(end);
-
-                                asm!("{target.vload(j, Addr::from(src))}");
-                                add!(src, src_rs);
-                            }
-                            label!(end = _);
-
-                            let (c, t, in_t) = self.transpose(len as _);
-                            *ctx.code.borrow_mut() += &c;
-
-                            for j in 0..len {
-                                asm!(
-                                    "{
-                                        target.vstore(
-                                            Addr::from(dst + (i * len * ty.sizeof() + j * dst_cs)),
-                                            if in_t { t as isize - j } else { j },
-                                        )
-                                    }"
-                                );
-                            }
-
-                            i += 1;
-                        }
+                        vmov!([dst + i * simd.sizeof()], zmm(0));
                     }
-                    add!(src, len * ty.sizeof());
-                    add!(dst, len * dst_cs);
 
-                    if len == 1 {
-                        dec!(depth_down);
-                    } else {
-                        sub!(depth_down, len);
-                    }
+                    add!(src, src_cs);
+                    add!(dst, dst_cs);
+                    dec!(depth);
                     jnz!(loop_begin);
-                    label!(loop_end = _);
 
-                    len /= 2;
+                    jmp!(end);
+
+                    label!(loop_begin_d = _);
+                    vbroadcast!(zmm(1), [diag_ptr]);
+
+                    for i in 0..m {
+                        if i + 1 == m {
+                            if need_mask {
+                                vmov!(zmm(0)[2], [src + i * simd.sizeof()]);
+                            } else {
+                                abort!();
+                            }
+                        } else {
+                            vmov!(zmm(0), [src + i * simd.sizeof()]);
+                        }
+                        vmul!(zmm(0), zmm(0), zmm(1));
+                        vmov!([dst + i * simd.sizeof()], zmm(0));
+                    }
+
+                    add!(src, src_cs);
+                    add!(dst, dst_cs);
+                    add!(diag_ptr, diag_stride);
+                    dec!(depth);
+                    jnz!(loop_begin_d);
+
+                    jmp!(end);
                 }
+
+                label!(rowmajor = _);
+                {
+                    mov!(src_rs, [info + INFO_LHS_RS]);
+
+                    let min_nrows = (m - 1) * self.len();
+
+                    for j in 0..simd.num_regs() {
+                        vxor!(zmm(j), zmm(j), zmm(j));
+                    }
+
+                    let mut len = self.len();
+
+                    while len >= 1 {
+                        label!({
+                            let loop_begin;
+                            let loop_end;
+                        });
+
+                        assert!(len <= 16);
+
+                        let target = Target {
+                            ty,
+                            simd: match len * ty.sizeof() * 8 {
+                                512 => Simd::_512,
+                                256 => Simd::_256,
+                                128 => Simd::_128,
+                                64 => Simd::_64,
+                                32 => Simd::_32,
+                                _ => unreachable!(),
+                            },
+                        };
+
+                        mov!(depth_down, depth);
+                        and!(depth_down, -len as i8);
+                        sub!(depth, depth_down);
+
+                        test!(depth_down, depth_down);
+                        jz!(loop_end);
+                        label!(loop_begin = _);
+                        {
+                            alloca!(src);
+                            alloca!(nrows);
+
+                            for i in 0..min_nrows / len {
+                                for j in 0..len {
+                                    asm!("{target.vload(j, Addr::from(src))}");
+                                    add!(src, src_rs);
+                                }
+
+                                let (c, t, in_t) = self.transpose(len as _);
+                                *ctx.code.borrow_mut() += &c;
+
+                                let d = if in_t { 0 } else { t as isize };
+                                {
+                                    alloca!(diag_ptr);
+                                    for j in 0..len {
+                                        let reg = if in_t { t as isize - j } else { j };
+                                        label!({
+                                            let cont;
+                                        });
+
+                                        test!(diag_ptr, diag_ptr);
+                                        jz!(cont);
+                                        asm!("{target.vbroadcast(d, Addr::from(diag_ptr))}");
+                                        asm!("{target.vmul(reg, reg, d)}");
+                                        add!(diag_ptr, diag_stride);
+
+                                        label!(cont = _);
+                                        asm!(
+                                            "{
+                                        target.vstore(
+                                            Addr::from(dst + (i * len * ty.sizeof() + j * dst_cs)),
+                                            reg,
+                                        )
+                                    }"
+                                        );
+                                    }
+                                }
+                            }
+                            let mut i = min_nrows / len;
+                            while i < m * self.len() / len {
+                                label!({
+                                    let end;
+                                });
+
+                                for j in 0..len {
+                                    cmp!(nrows, i * len + j);
+                                    jz!(end);
+
+                                    asm!("{target.vload(j, Addr::from(src))}");
+                                    add!(src, src_rs);
+                                }
+                                label!(end = _);
+
+                                let (c, t, in_t) = self.transpose(len as _);
+                                *ctx.code.borrow_mut() += &c;
+
+                                let d = if in_t { 0 } else { t as isize };
+                                {
+                                    alloca!(diag_ptr);
+                                    for j in 0..len {
+                                        let reg = if in_t { t as isize - j } else { j };
+                                        label!({
+                                            let cont;
+                                        });
+
+                                        test!(diag_ptr, diag_ptr);
+                                        jz!(cont);
+                                        asm!("{target.vbroadcast(d, Addr::from(diag_ptr))}");
+                                        asm!("{target.vmul(reg, reg, d)}");
+                                        add!(diag_ptr, diag_stride);
+
+                                        label!(cont = _);
+                                        asm!(
+                                            "{
+                                        target.vstore(
+                                            Addr::from(dst + (i * len * ty.sizeof() + j * dst_cs)),
+                                            reg,
+                                        )
+                                    }"
+                                        );
+                                    }
+                                }
+
+                                i += 1;
+                            }
+                        }
+
+                        add!(src, len * ty.sizeof());
+                        add!(dst, len * dst_cs);
+                        if len == 16 {
+                            lea!(diag_ptr, [diag_ptr + 8 * diag_stride]);
+                            lea!(diag_ptr, [diag_ptr + 8 * diag_stride]);
+                        } else {
+                            lea!(diag_ptr, [diag_ptr + len * diag_stride]);
+                        }
+
+                        if len == 1 {
+                            dec!(depth_down);
+                        } else {
+                            sub!(depth_down, len);
+                        }
+                        jnz!(loop_begin);
+                        label!(loop_end = _);
+
+                        len /= 2;
+                    }
+                }
+
+                label!(end = _);
             }
             name!().clone()
         };
@@ -1895,12 +2048,8 @@ impl Target {
                                     + self.len() * self.mask_sizeof()]
                             );
                         } else {
-                            alloca!(nrows);
-                            shl!(nrows, self.mask_sizeof().ilog2());
-                            lea!(
-                                mask_ptr,
-                                [tmp + nrows * 1 + self.len() * self.mask_sizeof()]
-                            );
+                            lea!(mask_ptr, [tmp + nrows * 8 + self.len() * 8]);
+                            lea!(mask_ptr, [tmp + nrows * 8 + self.len() * 8]);
                         }
                     }
                     label!(no_mask = _);
@@ -1963,40 +2112,22 @@ impl Target {
                 {
                     label!({
                         let load_A;
-                        let load_A_noB;
-                        let load_A_B;
-                        let load_noA_noB;
-                        let load_noA_B;
+                        let load_A;
+                        let load_noA;
                     });
                     cmp!(packed_lhs, lhs);
                     jnz!(load_A);
                     cmp!(packed_rhs, rhs);
-                    jnz!(load_noA_B);
 
-                    label!(load_noA_noB = _);
+                    label!(load_noA = _);
                     {
                         call!("{prefix}.load {suffix}");
                         jmp!(epilogue);
                     }
+
                     label!(load_A = _);
                     {
-                        cmp!(packed_rhs, rhs);
-                        jnz!(load_A_B);
-                    }
-
-                    label!(load_A_noB = _);
-                    {
                         call!("{prefix}.load.packA {suffix}");
-                        jmp!(epilogue);
-                    }
-                    label!(load_noA_B = _);
-                    {
-                        call!("{prefix}.load.packB {suffix}");
-                        jmp!(epilogue);
-                    }
-                    label!(load_A_B = _);
-                    {
-                        call!("{prefix}.load.packA.packB {suffix}");
                         jmp!(epilogue);
                     }
                 }
@@ -2005,42 +2136,22 @@ impl Target {
                 {
                     label!({
                         let mask_A;
-                        let mask_A_noB;
-                        let mask_A_B;
-                        let mask_noA_noB;
-                        let mask_noA_B;
+                        let mask_A;
+                        let mask_noA;
                     });
 
                     if need_mask {
                         cmp!(packed_lhs, lhs);
                         jnz!(mask_A);
-                        cmp!(packed_rhs, rhs);
-                        jnz!(mask_noA_B);
 
-                        label!(mask_noA_noB = _);
+                        label!(mask_noA = _);
                         {
                             call!("{prefix}.mask {suffix}");
                             jmp!(epilogue);
                         }
                         label!(mask_A = _);
                         {
-                            cmp!(packed_rhs, rhs);
-                            jnz!(mask_A_B);
-                        }
-
-                        label!(mask_A_noB = _);
-                        {
                             call!("{prefix}.mask.packA {suffix}");
-                            jmp!(epilogue);
-                        }
-                        label!(mask_noA_B = _);
-                        {
-                            call!("{prefix}.mask.packB {suffix}");
-                            jmp!(epilogue);
-                        }
-                        label!(mask_A_B = _);
-                        {
-                            call!("{prefix}.mask.packA.packB {suffix}");
                             jmp!(epilogue);
                         }
                     }
@@ -2230,7 +2341,7 @@ impl Target {
             ctx[lhs_rs].set(true);
             ctx[mask_ptr].set(true);
 
-            for diag in [false, true] {
+            for diag in [false] {
                 let __diag__ = if diag { ".diag" } else { "" };
 
                 for mask in if need_mask {
@@ -2243,7 +2354,7 @@ impl Target {
                     for pack_lhs in [false, true] {
                         let __pack_lhs__ = if pack_lhs { ".packA" } else { "" };
 
-                        for pack_rhs in [false, true] {
+                        for pack_rhs in [false] {
                             let __pack_rhs__ = if pack_rhs { ".packB" } else { "" };
 
                             for conj in if self.is_cplx() {
@@ -2269,15 +2380,6 @@ impl Target {
                                     );
                                 }
                                 label!(start0 = _);
-
-                                if !diag {
-                                    cmp!([info + INFO_DIAG_PTR], 0);
-                                    jz!(start1);
-                                    jmp!(
-                                        "{prefix}{__conj__}.diag{__mask__}{__pack_lhs__}{__pack_rhs__} {suffix}"
-                                    );
-                                }
-                                label!(start1 = _);
 
                                 let rhs_neg_cs = lhs_rs;
 
@@ -2613,7 +2715,6 @@ impl Target {
                     let rowmajor;
                     let colmajor;
                     let end;
-                    let finale;
                 });
 
                 mov!(rs, [info + INFO_RS]);
@@ -2814,37 +2915,6 @@ impl Target {
                     mov!(rsp, stack);
                 }
 
-                label!(finale = _);
-                let tmp = ptr;
-                mov!(tmp, m * self.len());
-                cmp!(nrows, tmp);
-                cmovc!(tmp, nrows);
-
-                bt!([rsi], 63);
-                jc!(rowmajor);
-
-                label!(colmajor = _);
-                {
-                    add!([position], tmp);
-                    sub!(nrows, tmp);
-
-                    jnz!(end);
-                    sub!(ncols, n);
-                    add!([position + WORD], n);
-                }
-                jmp!(end);
-
-                label!(rowmajor = _);
-                {
-                    add!([position + WORD], n);
-                    sub!(ncols, n);
-
-                    jnz!(end);
-
-                    add!([position], tmp);
-                    sub!(nrows, tmp);
-                }
-
                 label!(end = _);
             }
         }
@@ -2873,7 +2943,6 @@ impl Target {
                         let rowmajor;
                         let colmajor;
                         let end;
-                        let finale;
                     });
 
                     reg!(ptr);
@@ -2907,19 +2976,16 @@ impl Target {
                                             }
                                         }
                                         alloca!([position]);
-                                        alloca!([position + WORD]);
                                         alloca!(nrows);
-                                        alloca!(ncols);
-
                                         add!([position], self.len());
                                         sub!(nrows, self.len());
                                         call!(
                                             "{prefix}.epilogue{__mask__}{__triangle__}{__add__} [with m = {(m - 1) * self.len()}, n = {n}]"
                                         );
                                     }
-                                    jmp!(finale);
+                                    jmp!(end);
                                 } else {
-                                    jmp!(finale);
+                                    jmp!(end);
                                 }
                             }
 
@@ -2965,18 +3031,18 @@ impl Target {
                                                 vmov!(zmm(i + (m - 1) * j), zmm(i + m * j));
                                             }
                                         }
-                                        alloca!([position]);
-                                        alloca!([position + WORD]);
-                                        alloca!(nrows);
-                                        alloca!(ncols);
-
-                                        call!(
+                                        pop!(col);
+                                        pop!(row);
+                                        pop!(cs);
+                                        pop!(rs);
+                                        pop!(ptr);
+                                        jmp!(
                                             "{prefix}.epilogue{__mask__}{__triangle__}{__add__} [with m = {(m - 1) * self.len()}, n = {n}]"
                                         );
                                     }
-                                    jmp!(finale);
+                                    jmp!(end);
                                 } else {
-                                    jmp!(finale);
+                                    jmp!(end);
                                 }
                             }
 
@@ -3125,51 +3191,6 @@ impl Target {
                         }
                     }
 
-                    label!(finale = _);
-                    let tmp = ptr;
-                    mov!(tmp, m * self.len());
-                    cmp!(nrows, tmp);
-                    cmovc!(tmp, nrows);
-
-                    bt!([rsi], 63);
-                    jc!(rowmajor);
-
-                    label!(colmajor = _);
-                    {
-                        if mask {
-                            add!([position], tmp);
-                            sub!(nrows, tmp);
-
-                            jnz!(end);
-                            sub!(ncols, n);
-                            add!([position + WORD], n);
-                        } else {
-                            add!([position], m * self.len());
-                            sub!(nrows, m * self.len());
-                            jnz!(end);
-
-                            sub!(ncols, n);
-                            add!([position + WORD], n);
-                        }
-                    }
-                    jmp!(end);
-
-                    label!(rowmajor = _);
-                    {
-                        add!([position + WORD], n);
-                        sub!(ncols, n);
-
-                        jnz!(end);
-
-                        if mask {
-                            add!([position], tmp);
-                            sub!(nrows, tmp);
-                        } else {
-                            add!([position], m * self.len());
-                            sub!(nrows, m * self.len());
-                        }
-                    }
-
                     label!(end = _);
                 }
             }
@@ -3182,22 +3203,26 @@ impl Target {
 fn main() -> Result {
     let mut code = String::new();
 
-    let mut b128_simd512 = vec![];
-    let mut b64_simd512 = vec![];
-    let mut b32_simd512 = vec![];
+    let mut pack_c64_simd512 = vec![];
+    let mut pack_c32_simd512 = vec![];
+    let mut pack_f64_simd512 = vec![];
+    let mut pack_f32_simd512 = vec![];
 
-    let mut b128_simd256 = vec![];
-    let mut b64_simd256 = vec![];
-    let mut b32_simd256 = vec![];
+    let mut pack_c64_simd256 = vec![];
+    let mut pack_c32_simd256 = vec![];
+    let mut pack_f64_simd256 = vec![];
+    let mut pack_f32_simd256 = vec![];
 
-    let mut b128_simd128 = vec![];
-    let mut b64_simd128 = vec![];
-    let mut b32_simd128 = vec![];
+    let mut pack_c64_simd128 = vec![];
+    let mut pack_c32_simd128 = vec![];
+    let mut pack_f64_simd128 = vec![];
+    let mut pack_f32_simd128 = vec![];
 
-    let mut b64_simd64 = vec![];
-    let mut b32_simd64 = vec![];
+    let mut pack_f64_simd64 = vec![];
+    let mut pack_c32_simd64 = vec![];
+    let mut pack_f32_simd64 = vec![];
 
-    let mut b32_simd32 = vec![];
+    let mut pack_f32_simd32 = vec![];
 
     let mut f32_simd512 = vec![];
     let mut c32_simd512 = vec![];
@@ -3226,10 +3251,10 @@ fn main() -> Result {
     let mut f32_simd32 = vec![];
 
     for (out, pack, ty) in [
-        (&mut f32_simd512, &mut b32_simd512, Ty::F32),
-        (&mut c32_simd512, &mut vec![], Ty::C32),
-        (&mut f64_simd512, &mut b64_simd512, Ty::F64),
-        (&mut c64_simd512, &mut b128_simd512, Ty::C64),
+        (&mut f32_simd512, &mut pack_f32_simd512, Ty::F32),
+        (&mut c32_simd512, &mut pack_c32_simd512, Ty::C32),
+        (&mut f64_simd512, &mut pack_f64_simd512, Ty::F64),
+        (&mut c64_simd512, &mut pack_c64_simd512, Ty::C64),
     ] {
         for m in (1..=6).rev() {
             let target = Target {
@@ -3239,11 +3264,10 @@ fn main() -> Result {
 
             let last = if m == 1 { 8 } else { 4 };
 
-            let (name, f) = target.pack_row_major(m);
-            if ty != Ty::C32 {
-                pack.push(name);
-                code += &f;
-            }
+            let (name, f) = target.pack_lhs(m);
+
+            pack.push(name);
+            code += &f;
 
             for n in 1..=last {
                 let (name, f) = target.microkernel(m, n);
@@ -3276,10 +3300,10 @@ fn main() -> Result {
     }
 
     for (out, pack, ty) in [
-        (&mut f32_simd256, &mut b32_simd256, Ty::F32),
-        (&mut c32_simd256, &mut vec![], Ty::C32),
-        (&mut f64_simd256, &mut b64_simd256, Ty::F64),
-        (&mut c64_simd256, &mut b128_simd256, Ty::C64),
+        (&mut f32_simd256, &mut pack_f32_simd256, Ty::F32),
+        (&mut c32_simd256, &mut pack_c32_simd256, Ty::C32),
+        (&mut f64_simd256, &mut pack_f64_simd256, Ty::F64),
+        (&mut c64_simd256, &mut pack_c64_simd256, Ty::C64),
     ] {
         for m in (1..=3).rev() {
             let target = Target {
@@ -3289,11 +3313,10 @@ fn main() -> Result {
 
             let last = if m == 1 { 8 } else { 4 };
 
-            let (name, f) = target.pack_row_major(m);
-            if ty != Ty::C32 {
-                pack.push(name);
-                code += &f;
-            }
+            let (name, f) = target.pack_lhs(m);
+
+            pack.push(name);
+            code += &f;
 
             for n in 1..=last {
                 let (name, f) = target.microkernel(m, n);
@@ -3304,23 +3327,22 @@ fn main() -> Result {
     }
 
     for (out, pack, ty, simd) in [
-        (&mut f32_simd128, &mut b32_simd128, Ty::F32, Simd::_128),
-        (&mut c32_simd128, &mut vec![], Ty::C32, Simd::_128),
-        (&mut f64_simd128, &mut b64_simd128, Ty::F64, Simd::_128),
-        (&mut c64_simd128, &mut b128_simd128, Ty::C64, Simd::_128),
-        (&mut f32_simd64, &mut b32_simd64, Ty::F32, Simd::_64),
-        (&mut c32_simd64, &mut vec![], Ty::C32, Simd::_64),
-        (&mut f64_simd64, &mut b64_simd64, Ty::F64, Simd::_64),
-        (&mut f32_simd32, &mut b32_simd32, Ty::F32, Simd::_32),
+        (&mut f32_simd128, &mut pack_f32_simd128, Ty::F32, Simd::_128),
+        (&mut c32_simd128, &mut pack_c32_simd128, Ty::C32, Simd::_128),
+        (&mut f64_simd128, &mut pack_f64_simd128, Ty::F64, Simd::_128),
+        (&mut c64_simd128, &mut pack_c64_simd128, Ty::C64, Simd::_128),
+        (&mut f32_simd64, &mut pack_f32_simd64, Ty::F32, Simd::_64),
+        (&mut c32_simd64, &mut pack_c32_simd64, Ty::C32, Simd::_64),
+        (&mut f64_simd64, &mut pack_f64_simd64, Ty::F64, Simd::_64),
+        (&mut f32_simd32, &mut pack_f32_simd32, Ty::F32, Simd::_32),
     ] {
         for m in (1..=1).rev() {
             let target = Target { ty, simd };
 
-            let (name, f) = target.pack_row_major(m);
-            if ty != Ty::C32 {
-                pack.push(name);
-                code += &f;
-            }
+            let (name, f) = target.pack_lhs(m);
+
+            pack.push(name);
+            code += &f;
 
             for n in 1..=8 {
                 let (name, f) = target.microkernel(m, n);
@@ -3361,17 +3383,21 @@ fn main() -> Result {
             (&f32_simd64, Ty::F32, "64"),
             (&c32_simd64, Ty::C32, "64"),
             (&f64_simd64, Ty::F64, "64"),
-            (&b32_simd512, Ty::F32, "pack_512"),
-            (&b64_simd512, Ty::F64, "pack_512"),
-            (&b128_simd512, Ty::C64, "pack_512"),
-            (&b32_simd256, Ty::F32, "pack_256"),
-            (&b64_simd256, Ty::F64, "pack_256"),
-            (&b128_simd256, Ty::C64, "pack_256"),
-            (&b32_simd128, Ty::F32, "pack_128"),
-            (&b64_simd128, Ty::F64, "pack_128"),
-            (&b128_simd128, Ty::C64, "pack_128"),
-            (&b32_simd64, Ty::F32, "pack_64"),
-            (&b64_simd64, Ty::F64, "pack_64"),
+            (&pack_f32_simd512, Ty::F32, "pack_512"),
+            (&pack_f64_simd512, Ty::F64, "pack_512"),
+            (&pack_c32_simd512, Ty::C32, "pack_512"),
+            (&pack_c64_simd512, Ty::C64, "pack_512"),
+            (&pack_f32_simd256, Ty::F32, "pack_256"),
+            (&pack_f64_simd256, Ty::F64, "pack_256"),
+            (&pack_c32_simd256, Ty::C32, "pack_256"),
+            (&pack_c64_simd256, Ty::C64, "pack_256"),
+            (&pack_f32_simd128, Ty::F32, "pack_128"),
+            (&pack_f64_simd128, Ty::F64, "pack_128"),
+            (&pack_c32_simd128, Ty::C32, "pack_128"),
+            (&pack_c64_simd128, Ty::C64, "pack_128"),
+            (&pack_f32_simd64, Ty::F32, "pack_64"),
+            (&pack_c32_simd64, Ty::C32, "pack_64"),
+            (&pack_f64_simd64, Ty::F64, "pack_64"),
         ] {
             for (i, name) in names.iter().enumerate() {
                 code += &format!(

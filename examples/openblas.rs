@@ -2,7 +2,7 @@ use aligned_vec::avec;
 use diol::{Picoseconds, config::*, prelude::*};
 use rand::prelude::*;
 
-extern crate openblas_src;
+extern crate blis_src;
 
 fn bench_blas(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
     let rng = &mut StdRng::seed_from_u64(0);
@@ -81,7 +81,7 @@ fn main() -> eyre::Result<()> {
             });
             bench.register_many(
                 &format!("k={k} m=n"),
-                list![f[0].with_name("openblas")],
+                list![f[0].with_name("aocl blis")],
                 args_big,
             );
             std::fs::write(
