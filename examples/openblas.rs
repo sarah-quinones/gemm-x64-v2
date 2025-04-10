@@ -106,7 +106,7 @@ fn main() -> eyre::Result<()> {
                 });
                 bench.register_many(
                     &format!("k={k} n={m}"),
-                    list![f[0].with_name("all")],
+                    list![f[0].with_name("openblas")],
                     args_big,
                 );
                 std::fs::write(
@@ -130,7 +130,7 @@ fn main() -> eyre::Result<()> {
                 });
                 bench.register_many(
                     &format!("k={k} m={m}"),
-                    list![f[0].with_name("all")],
+                    list![f[0].with_name("openblas")],
                     args_big,
                 );
                 std::fs::write(
