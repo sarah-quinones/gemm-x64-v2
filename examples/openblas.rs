@@ -2,7 +2,7 @@ use aligned_vec::avec;
 use diol::{Picoseconds, config::*, prelude::*};
 use rand::prelude::*;
 
-extern crate blis_src;
+extern crate openblas_src;
 
 fn bench_blas(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
     let rng = &mut StdRng::seed_from_u64(0);
@@ -81,12 +81,12 @@ fn main() -> eyre::Result<()> {
             });
             bench.register_many(
                 &format!("k={k} m=n"),
-                list![f[0].with_name("aocl blis")],
+                list![f[0].with_name("openblas")],
                 args_big,
             );
             std::fs::write(
                 format!(
-                    "{}/openblas {}.json",
+                    "{}/timings {}.json",
                     concat!(env!("CARGO_MANIFEST_DIR")),
                     bench.groups.borrow().keys().next().unwrap()
                 ),
@@ -106,12 +106,12 @@ fn main() -> eyre::Result<()> {
                 });
                 bench.register_many(
                     &format!("k={k} n={m}"),
-                    list![f[0].with_name("openblas")],
+                    list![f[0].with_name("all")],
                     args_big,
                 );
                 std::fs::write(
                     format!(
-                        "{}/openblas {}.json",
+                        "{}/timings {}.json",
                         concat!(env!("CARGO_MANIFEST_DIR")),
                         bench.groups.borrow().keys().next().unwrap()
                     ),
@@ -130,12 +130,12 @@ fn main() -> eyre::Result<()> {
                 });
                 bench.register_many(
                     &format!("k={k} m={m}"),
-                    list![f[0].with_name("openblas")],
+                    list![f[0].with_name("all")],
                     args_big,
                 );
                 std::fs::write(
                     format!(
-                        "{}/openblas {}.json",
+                        "{}/timings {}.json",
                         concat!(env!("CARGO_MANIFEST_DIR")),
                         bench.groups.borrow().keys().next().unwrap()
                     ),

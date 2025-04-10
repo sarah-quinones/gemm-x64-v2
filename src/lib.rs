@@ -6,6 +6,7 @@ const M: usize = 4;
 const N: usize = 32;
 
 use core::{
+    cell::RefCell,
     ptr::{null, null_mut},
     sync::atomic::{AtomicU8, AtomicUsize, Ordering},
 };
@@ -19,14 +20,16 @@ pub struct Position {
     pub col: usize,
 }
 
-const FLAGS_ACCUM: u32 = 0;
-const FLAGS_CONJ_LHS: u32 = 1;
-const FLAGS_CONJ_NEQ: u32 = 2;
-const FLAGS_LOWER: u32 = 3;
-const FLAGS_UPPER: u32 = 4;
-const FLAGS_32BIT_IDX: u32 = 5;
-const FLAGS_CPLX: u32 = 62;
-const FLAGS_ROWMAJOR: u32 = 63;
+mod cache;
+
+const FLAGS_ACCUM: usize = 1 << 0;
+const FLAGS_CONJ_LHS: usize = 1 << 1;
+const FLAGS_CONJ_NEQ: usize = 1 << 2;
+const FLAGS_LOWER: usize = 1 << 3;
+const FLAGS_UPPER: usize = 1 << 4;
+const FLAGS_32BIT_IDX: usize = 1 << 5;
+const FLAGS_CPLX: usize = 1 << 62;
+const FLAGS_ROWMAJOR: usize = 1 << 63;
 
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
@@ -203,8 +206,8 @@ pub unsafe fn millikernel_rowmajor(
     let mut lhs = lhs;
     let mut packed_lhs = packed_lhs;
 
-    let tril = milli.micro.flags & (1 << FLAGS_LOWER) != 0;
-    let triu = milli.micro.flags & (1 << FLAGS_UPPER) != 0;
+    let tril = milli.micro.flags & FLAGS_LOWER != 0;
+    let triu = milli.micro.flags & FLAGS_UPPER != 0;
     let rectangular = !tril && !triu;
 
     loop {
@@ -327,8 +330,8 @@ pub unsafe fn millikernel_colmajor(
     let mut rhs = rhs;
     let mut packed_rhs = packed_rhs;
 
-    let tril = milli.micro.flags & (1 << FLAGS_LOWER) != 0;
-    let triu = milli.micro.flags & (1 << FLAGS_UPPER) != 0;
+    let tril = milli.micro.flags & FLAGS_LOWER != 0;
+    let triu = milli.micro.flags & FLAGS_UPPER != 0;
     let rectangular = !tril && !triu;
 
     let mut j = 0;
@@ -468,8 +471,8 @@ pub unsafe fn millikernel_par(
     let thd_id0 = thd_id % (n_threads0);
     let thd_id1 = thd_id / (n_threads0);
 
-    let tril = milli.micro.flags & (1 << FLAGS_LOWER) != 0;
-    let triu = milli.micro.flags & (1 << FLAGS_UPPER) != 0;
+    let tril = milli.micro.flags & FLAGS_LOWER != 0;
+    let triu = milli.micro.flags & FLAGS_UPPER != 0;
     let rectangular = !tril && !triu;
 
     let i = mf * thd_id0;
@@ -741,7 +744,7 @@ struct Milli {
     nr: usize,
     sizeof: usize,
 }
-struct MilliPar<'a, 'b> {
+struct MilliPar {
     mr: usize,
     nr: usize,
     hyper: usize,
@@ -752,7 +755,6 @@ struct MilliPar<'a, 'b> {
     pack_rhs_job: Box<[AtomicU8]>,
     finished: AtomicUsize,
     n_threads: usize,
-    __: &'a &'b (),
 }
 
 unsafe impl Millikernel for Milli {
@@ -799,11 +801,11 @@ unsafe impl Millikernel for Milli {
 }
 
 #[derive(Copy, Clone)]
-pub struct Cell<T>(pub T);
-unsafe impl<T> Sync for Cell<T> {}
-unsafe impl<T> Send for Cell<T> {}
+pub struct ForceSync<T>(pub T);
+unsafe impl<T> Sync for ForceSync<T> {}
+unsafe impl<T> Send for ForceSync<T> {}
 
-unsafe impl Millikernel for MilliPar<'_, '_> {
+unsafe impl Millikernel for MilliPar {
     unsafe fn call(
         &mut self,
 
@@ -822,11 +824,11 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
         milli: &MillikernelInfo,
         pos: Position,
     ) {
-        let lhs = Cell(lhs);
-        let mut rhs = Cell(rhs);
-        let packed_lhs = Cell(packed_lhs);
-        let packed_rhs = Cell(packed_rhs);
-        let milli = Cell(milli);
+        let lhs = ForceSync(lhs);
+        let mut rhs = ForceSync(rhs);
+        let packed_lhs = ForceSync(packed_lhs);
+        let packed_rhs = ForceSync(packed_rhs);
+        let milli = ForceSync(milli);
 
         self.microkernel_job.fill_with(|| AtomicU8::new(0));
         self.pack_lhs_job.fill_with(|| AtomicU8::new(0));
@@ -880,12 +882,12 @@ unsafe impl Millikernel for MilliPar<'_, '_> {
                         let ncols = Ord::min(ncols - col, nr);
 
                         let rs = ncols;
-                        let rhs = Cell(
+                        let rhs = ForceSync(
                             { rhs }
                                 .0
                                 .wrapping_byte_offset({ milli }.0.rhs_cs * i as isize),
                         );
-                        let packed_rhs = Cell(
+                        let packed_rhs = ForceSync(
                             { packed_rhs }
                                 .0
                                 .wrapping_byte_offset({ milli }.0.packed_rhs_cs * i as isize),
@@ -1217,8 +1219,8 @@ unsafe fn kernel_imp(
                 0,
                 0,
                 0,
-                is_packed_lhs || (j > 0 && packed_lhs_rs[depth] != 0),
-                is_packed_rhs || (i > 0 && packed_rhs_cs[depth] != 0),
+                is_packed_lhs || (j > 0 && packed_lhs_rs[depth - 1] != 0),
+                is_packed_rhs || (i > 0 && packed_rhs_cs[depth - 1] != 0),
                 jj % 2 == 1,
                 ii % 2 == 1,
             );
@@ -1263,13 +1265,12 @@ pub unsafe fn kernel_rayon(
     let max_jobs = max_i * max_j;
     let c = max_i;
 
-    let lhs = Cell(lhs);
-    let rhs = Cell(rhs);
-    let packed_lhs = Cell(packed_lhs);
-    let packed_rhs = Cell(packed_rhs);
-    let info = Cell(info);
+    let lhs = ForceSync(lhs);
+    let rhs = ForceSync(rhs);
+    let packed_lhs = ForceSync(packed_lhs);
+    let packed_rhs = ForceSync(packed_rhs);
+    let info = ForceSync(info);
 
-    // spindle::with_lock(n_threads, || {
     unsafe {
         kernel_imp(
             &mut MilliPar {
@@ -1282,7 +1283,6 @@ pub unsafe fn kernel_rayon(
                 pack_rhs_job: (0..max_j).map(|_| AtomicU8::new(0)).collect(),
                 finished: AtomicUsize::new(0),
                 n_threads,
-                __: &&(),
             },
             microkernel,
             pack,
@@ -1306,10 +1306,323 @@ pub unsafe fn kernel_rayon(
             { info }.0,
         )
     };
-    // });
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum InstrSet {
+    Avx256,
+    Avx512,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DType {
+    F32,
+    F64,
+    C32,
+    C64,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Accum {
+    Replace,
+    Add,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IType {
+    U32,
+    U64,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DstKind {
+    Lower,
+    Upper,
+    Full,
+}
+
+pub unsafe fn gemm(
+    dtype: DType,
+    itype: IType,
+
+    instr: InstrSet,
+    nrows: usize,
+    ncols: usize,
+    depth: usize,
+
+    dst: *mut (),
+    dst_rs: isize,
+    dst_cs: isize,
+    dst_row_idx: *const (),
+    dst_col_idx: *const (),
+    dst_kind: DstKind,
+
+    beta: Accum,
+
+    lhs: *const (),
+    lhs_rs: isize,
+    lhs_cs: isize,
+    conj_lhs: bool,
+
+    real_diag: *const (),
+    real_diag_stride: isize,
+
+    rhs: *const (),
+    rhs_rs: isize,
+    rhs_cs: isize,
+    conj_rhs: bool,
+
+    alpha: *const (),
+
+    n_threads: usize,
+) {
+    let (microkernel, pack, mr, nr) = match (instr, dtype) {
+        (InstrSet::Avx256, DType::F32) => {
+            (F32_SIMD256.as_slice(), F32_SIMDpack_256.as_slice(), 24, 4)
+        }
+        (InstrSet::Avx256, DType::F64) => {
+            (F64_SIMD256.as_slice(), F64_SIMDpack_256.as_slice(), 12, 4)
+        }
+        (InstrSet::Avx256, DType::C32) => {
+            (C32_SIMD256.as_slice(), C32_SIMDpack_256.as_slice(), 12, 4)
+        }
+        (InstrSet::Avx256, DType::C64) => {
+            (C64_SIMD256.as_slice(), C64_SIMDpack_256.as_slice(), 6, 4)
+        }
+        (InstrSet::Avx512, DType::F32) => {
+            (F32_SIMD512x4.as_slice(), F32_SIMDpack_512.as_slice(), 96, 4)
+        }
+        (InstrSet::Avx512, DType::F64) => {
+            (F64_SIMD512x4.as_slice(), F64_SIMDpack_512.as_slice(), 48, 4)
+        }
+        (InstrSet::Avx512, DType::C32) => {
+            (C32_SIMD512x4.as_slice(), C32_SIMDpack_512.as_slice(), 48, 4)
+        }
+        (InstrSet::Avx512, DType::C64) => {
+            (C64_SIMD512x4.as_slice(), C64_SIMDpack_512.as_slice(), 24, 4)
+        }
+    };
+    let (sizeof, cplx) = match dtype {
+        DType::F32 => (4, false),
+        DType::F64 => (8, false),
+        DType::C32 => (8, true),
+        DType::C64 => (16, true),
+    };
+
+    let m = nrows;
+    let n = ncols;
+
+    let kc = Ord::min(depth, 512);
+    let lhs_rs = lhs_rs * sizeof as isize;
+    let lhs_cs = lhs_cs * sizeof as isize;
+    let rhs_rs = rhs_rs * sizeof as isize;
+    let rhs_cs = rhs_cs * sizeof as isize;
+    let dst_rs = dst_rs * sizeof as isize;
+    let dst_cs = dst_cs * sizeof as isize;
+
+    let cache = *cache::CACHE_INFO;
+
+    let l1 = cache[0].cache_bytes / sizeof;
+    let l2 = cache[1].cache_bytes / sizeof;
+    let l3 = cache[2].cache_bytes / sizeof * n_threads / 2;
+
+    #[repr(align(4096))]
+    struct Page([u8; 4096]);
+
+    let lhs_size = (l3.next_multiple_of(16) * sizeof).div_ceil(size_of::<Page>());
+    let rhs_size = (l3.next_multiple_of(nr) * sizeof).div_ceil(size_of::<Page>());
+
+    thread_local! {
+        static MEM: RefCell<Vec::<core::mem::MaybeUninit<Page>>> = {
+            let cache = *cache::CACHE_INFO;
+            let l3 = cache[2].cache_bytes * rayon::current_num_threads() / 2;
+
+            let lhs_size = l3.div_ceil(size_of::<Page>());
+            let rhs_size = l3.div_ceil(size_of::<Page>());
+
+            let mut mem = Vec::with_capacity(lhs_size + rhs_size);
+            unsafe { mem.set_len(lhs_size + rhs_size) };
+            RefCell::new(mem)
+        };
+    }
+
+    MEM.with_borrow_mut(|mem| {
+        if mem.len() < lhs_size + rhs_size {
+            mem.reserve_exact(lhs_size + rhs_size);
+            unsafe { mem.set_len(lhs_size + rhs_size) };
+        }
+
+        let (packed_lhs, mem) = mem.split_at_mut(lhs_size);
+        let (packed_rhs, _) = mem.split_at_mut(rhs_size);
+
+        let lhs = ForceSync(lhs);
+        let rhs = ForceSync(rhs);
+        let dst = ForceSync(dst);
+        let real_diag = ForceSync(real_diag);
+        let dst_row_idx = ForceSync(dst_row_idx);
+        let dst_col_idx = ForceSync(dst_col_idx);
+        let alpha = ForceSync(alpha);
+
+        // spindle::with_lock(n_threads, || {
+        ({
+            let mut k = 0;
+            let mut beta = beta;
+            while k < depth {
+                let kc = Ord::min(depth - k, kc);
+                let f = kc.div_ceil(64);
+                let l1 = l1 / 64 / f;
+                let l2 = l2 / 64 / f;
+                let l3 = l3 / 64 / f;
+
+                let tall = m >= 3 * n / 2 && m >= l3;
+                let pack_lhs = (n > 6 * nr && tall) || (n > 6 * nr * n_threads);
+                let pack_rhs = tall;
+
+                let (row_chunk, col_chunk, rowmajor) = if n_threads > 1 {
+                    (
+                        //
+                        [m, m, m, l3, mr],
+                        [n, n, n, l3, nr],
+                        false,
+                    )
+                } else if tall {
+                    (
+                        //
+                        [m, l3, l3 / 2, l1, mr],
+                        [n, l3, l3 / 2, l2, nr],
+                        true,
+                    )
+                } else {
+                    (
+                        //
+                        [2 * l3, l3, l3 / 2, l2, mr],
+                        [l3, l3 / 2, l3 / 4, l1, nr],
+                        false,
+                    )
+                };
+
+                let mut row_chunk = row_chunk.map(|r| r.next_multiple_of(16));
+                let mut col_chunk = col_chunk.map(|c| c.next_multiple_of(nr));
+
+                let q = row_chunk.len();
+                {
+                    for i in (1..q - 1).rev() {
+                        row_chunk[i - 1] = Ord::max(
+                            row_chunk[i - 1].next_multiple_of(row_chunk[i]),
+                            row_chunk[i],
+                        );
+                    }
+                    for i in (1..q - 1).rev() {
+                        col_chunk[i - 1] = Ord::max(
+                            col_chunk[i - 1].next_multiple_of(col_chunk[i]),
+                            col_chunk[i],
+                        );
+                    }
+                }
+
+                let all_lhs_rs = row_chunk.map(|m| m as isize * lhs_rs);
+                let all_rhs_cs = col_chunk.map(|n| n as isize * rhs_cs);
+
+                let packed_lhs_rs = row_chunk.map(|x| {
+                    if x > l3 / 2 {
+                        0
+                    } else {
+                        (x * kc * sizeof) as isize
+                    }
+                });
+                let packed_rhs_cs = col_chunk.map(|x| {
+                    if x > l3 / 2 {
+                        0
+                    } else {
+                        (x * kc * sizeof) as isize
+                    }
+                });
+
+                unsafe {
+                    kernel(
+                        n_threads,
+                        microkernel,
+                        pack,
+                        mr,
+                        nr,
+                        sizeof,
+                        { lhs }.0,
+                        if pack_lhs {
+                            packed_lhs.as_mut_ptr() as *mut ()
+                        } else {
+                            { lhs }.0 as *mut ()
+                        },
+                        { rhs }.0,
+                        if pack_rhs {
+                            packed_rhs.as_mut_ptr() as *mut ()
+                        } else {
+                            { rhs }.0 as *mut ()
+                        },
+                        nrows,
+                        ncols,
+                        &row_chunk,
+                        &col_chunk,
+                        &all_lhs_rs,
+                        &all_rhs_cs,
+                        if pack_lhs {
+                            &packed_lhs_rs
+                        } else {
+                            &all_lhs_rs
+                        },
+                        if pack_rhs {
+                            &packed_rhs_cs
+                        } else {
+                            &all_rhs_cs
+                        },
+                        0,
+                        0,
+                        Position { row: 0, col: 0 },
+                        &MicrokernelInfo {
+                            flags: match beta {
+                                Accum::Replace => 0,
+                                Accum::Add => FLAGS_ACCUM,
+                            } | if conj_lhs { FLAGS_CONJ_LHS } else { 0 }
+                                | if conj_lhs != conj_rhs {
+                                    FLAGS_CONJ_NEQ
+                                } else {
+                                    0
+                                }
+                                | match itype {
+                                    IType::U32 => FLAGS_32BIT_IDX,
+                                    IType::U64 => 0,
+                                }
+                                | if cplx { FLAGS_CPLX } else { 0 }
+                                | match dst_kind {
+                                    DstKind::Lower => FLAGS_LOWER,
+                                    DstKind::Upper => FLAGS_UPPER,
+                                    DstKind::Full => 0,
+                                }
+                                | if rowmajor { FLAGS_ROWMAJOR } else { 0 },
+                            depth: kc,
+                            lhs_rs,
+                            lhs_cs,
+                            rhs_rs,
+                            rhs_cs,
+                            alpha: { alpha }.0,
+                            ptr: { dst }.0,
+                            rs: dst_rs,
+                            cs: dst_cs,
+                            row_idx: { dst_row_idx }.0,
+                            col_idx: { dst_col_idx }.0,
+                            diag_ptr: { real_diag }.0,
+                            diag_stride: real_diag_stride,
+                        },
+                    )
+                };
+                k += kc;
+                beta = Accum::Add;
+            }
+        });
+    });
 }
 
 pub unsafe fn kernel(
+    n_threads: usize,
     microkernel: &[unsafe extern "C" fn()],
     pack: &[unsafe extern "C" fn()],
 
@@ -1340,8 +1653,24 @@ pub unsafe fn kernel(
     info: &MicrokernelInfo,
 ) {
     unsafe {
+        let max_i = nrows.div_ceil(mr);
+        let max_j = ncols.div_ceil(nr);
+        let max_jobs = max_i * max_j;
+        let c = max_i;
+        let mut seq = Milli { mr, nr, sizeof };
+        let mut par = MilliPar {
+            mr,
+            nr,
+            sizeof,
+            hyper: 1,
+            microkernel_job: (0..c * max_j).map(|_| AtomicU8::new(0)).collect(),
+            pack_lhs_job: (0..max_i).map(|_| AtomicU8::new(0)).collect(),
+            pack_rhs_job: (0..max_j).map(|_| AtomicU8::new(0)).collect(),
+            finished: AtomicUsize::new(0),
+            n_threads,
+        };
         kernel_imp(
-            &mut Milli { mr, nr, sizeof },
+            if n_threads > 1 { &mut par } else { &mut seq },
             microkernel,
             pack,
             mr,
@@ -1532,6 +1861,7 @@ mod tests_f64 {
                     let packed_rhs_cs = col_chunk.map(|n| (n * k) as isize * sizeof);
 
                     kernel(
+                        1,
                         &F64_SIMD512x4[..24],
                         &F64_SIMDpack_512,
                         48,
@@ -1892,6 +2222,7 @@ mod tests_f32 {
                     packed_rhs_cs[0] = 0;
 
                     kernel(
+                        1,
                         &F32_SIMD512x4[..24],
                         &F32_SIMDpack_512,
                         96,
@@ -3026,12 +3357,12 @@ mod tests_c32_gather_scatter {
                                                         packed_rhs_cs: 4 * sizeof * k as isize,
                                                         micro: MicrokernelInfo {
                                                             flags: ((conj_lhs as usize)
-                                                                << FLAGS_CONJ_LHS)
+                                                                * FLAGS_CONJ_LHS)
                                                                 | ((conj_different as usize)
-                                                                    << FLAGS_CONJ_NEQ)
-                                                                | (1 << FLAGS_UPPER)
-                                                                | (1 << FLAGS_32BIT_IDX)
-                                                                | (1 << FLAGS_CPLX),
+                                                                    * FLAGS_CONJ_NEQ)
+                                                                | (1 * FLAGS_UPPER)
+                                                                | (1 * FLAGS_32BIT_IDX)
+                                                                | (1 * FLAGS_CPLX),
                                                             depth: k,
                                                             lhs_rs: 2 * sizeof,
                                                             lhs_cs: 2 * cs as isize * sizeof,

@@ -3,10 +3,26 @@ name = "gemm-x86"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = [
+  "std",
+]
+rayon = [
+  "dep:rayon",
+  "dep:spindle",
+  "dep:crossbeam",
+]
+
+std = [
+  "rayon",
+]
+
 [dependencies]
-crossbeam = "0.8.4"
-rayon = "1.10.0"
-spindle = "0.2.0"
+raw-cpuid = "11.5.0"
+crossbeam = { version = "0.8.4", optional = true }
+rayon = { version = "1.10.0", optional = true }
+spindle = { version = "0.2.0", optional = true }
+once_cell = { version = "1.21.3", default-features = false, features = ["race", "portable-atomic"] }
 
 [dev-dependencies]
 aligned-vec = "0.6.4"
@@ -23,7 +39,6 @@ toml = "0.8.20"
 json = "0.12.4"
 serde_json = "1.0.140"
 faer = "0.21.9"
-blis-src = { version = "0.2.2", features = ["openmp", "system"] }
 
 [build-dependencies]
 defer = "0.2.1"

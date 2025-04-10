@@ -140,12 +140,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blis-src"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc119b6761ce8b063102502af49043051f81a9bdf242ae06d12e9ea0d92b727a"
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -889,7 +883,6 @@ version = "0.1.0"
 dependencies = [
  "aligned-vec",
  "blas-sys",
- "blis-src",
  "bytemuck",
  "crossbeam",
  "defer",
@@ -900,9 +893,11 @@ dependencies = [
  "interpol",
  "json",
  "lapack-sys",
+ "once_cell",
  "openblas-src",
  "openmp-sys",
  "rand 0.9.0",
+ "raw-cpuid",
  "rayon",
  "serde_json",
  "spindle",
@@ -1361,9 +1356,12 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.21.1"
+version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d75b0bedcc4fe52caa0e03d9f1151a323e4aa5e2d78ba3580400cd3c9e2bc4bc"
+checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+dependencies = [
+ "portable-atomic",
+]
 
 [[package]]
 name = "openblas-build"
@@ -1555,6 +1553,12 @@ name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
+
+[[package]]
+name = "portable-atomic"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "350e9b48cbc6b0e028b0473b114454c6316e57336ee184ceab6e53f72c178b3e"
 
 [[package]]
 name = "ppv-lite86"
