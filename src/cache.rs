@@ -7,7 +7,6 @@ pub struct CacheInfo {
 
 fn cache_info() -> Option<[CacheInfo; 3]> {
     if !cfg!(miri) {
-        #[cfg(feature = "std")]
         {
             #[cfg(target_os = "linux")]
             {
@@ -400,18 +399,8 @@ impl core::ops::Deref for CacheInfoDeref {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        #[cfg(not(feature = "std"))]
-        {
-            static CACHE_INFO: once_cell::race::OnceBox<[CacheInfo; 3]> =
-                once_cell::race::OnceBox::new();
-            CACHE_INFO
-                .get_or_init(|| alloc::boxed::Box::new(cache_info().unwrap_or(CACHE_INFO_DEFAULT)))
-        }
-        #[cfg(feature = "std")]
-        {
-            static CACHE_INFO: std::sync::OnceLock<[CacheInfo; 3]> = std::sync::OnceLock::new();
-            CACHE_INFO.get_or_init(|| cache_info().unwrap_or(CACHE_INFO_DEFAULT))
-        }
+        static CACHE_INFO: std::sync::OnceLock<[CacheInfo; 3]> = std::sync::OnceLock::new();
+        CACHE_INFO.get_or_init(|| cache_info().unwrap_or(CACHE_INFO_DEFAULT))
     }
 }
 

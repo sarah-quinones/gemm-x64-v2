@@ -1016,7 +1016,11 @@ impl Simd {
     }
 
     fn num_regs(self) -> isize {
-        if self.sizeof() == 64 { 32 } else { 16 }
+        if self.sizeof() == 64 {
+            32
+        } else {
+            16
+        }
     }
 
     fn sizeof(self) -> isize {
@@ -1658,7 +1662,8 @@ impl Target {
             },
         };
 
-        (ctx.code.borrow().clone(), t, in_t)
+        let x = (ctx.code.borrow().clone(), t, in_t);
+        x
     }
 
     fn pack_lhs(self, m: isize) -> (String, String) {
@@ -1981,7 +1986,8 @@ impl Target {
             name!().clone()
         };
 
-        (main, ctx.code.borrow().clone())
+        let x = (main, ctx.code.borrow().clone());
+        x
     }
 
     fn microkernel(self, m: isize, n: isize) -> (String, String) {

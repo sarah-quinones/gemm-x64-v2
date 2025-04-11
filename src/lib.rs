@@ -1,4 +1,3 @@
-#![cfg_attr(all(not(test), any()), no_std)]
 #![allow(non_upper_case_globals)]
 #![allow(dead_code, unused_variables)]
 
@@ -744,6 +743,7 @@ struct Milli {
     nr: usize,
     sizeof: usize,
 }
+#[cfg(feature = "rayon")]
 struct MilliPar {
     mr: usize,
     nr: usize,
@@ -805,6 +805,7 @@ pub struct ForceSync<T>(pub T);
 unsafe impl<T> Sync for ForceSync<T> {}
 unsafe impl<T> Send for ForceSync<T> {}
 
+#[cfg(feature = "rayon")]
 unsafe impl Millikernel for MilliPar {
     unsafe fn call(
         &mut self,
@@ -1229,85 +1230,6 @@ unsafe fn kernel_imp(
     }
 }
 
-pub unsafe fn kernel_rayon(
-    n_threads: usize,
-    microkernel: &[unsafe extern "C" fn()],
-    pack: &[unsafe extern "C" fn()],
-
-    mr: usize,
-    nr: usize,
-    sizeof: usize,
-
-    lhs: *const (),
-    packed_lhs: *mut (),
-
-    rhs: *const (),
-    packed_rhs: *mut (),
-
-    nrows: usize,
-    ncols: usize,
-
-    row_chunk: &[usize],
-    col_chunk: &[usize],
-    lhs_rs: &[isize],
-    rhs_cs: &[isize],
-    packed_lhs_rs: &[isize],
-    packed_rhs_cs: &[isize],
-
-    row: usize,
-    col: usize,
-
-    pos: Position,
-    info: &MicrokernelInfo,
-) {
-    let max_i = nrows.div_ceil(mr);
-    let max_j = ncols.div_ceil(nr);
-    let max_jobs = max_i * max_j;
-    let c = max_i;
-
-    let lhs = ForceSync(lhs);
-    let rhs = ForceSync(rhs);
-    let packed_lhs = ForceSync(packed_lhs);
-    let packed_rhs = ForceSync(packed_rhs);
-    let info = ForceSync(info);
-
-    unsafe {
-        kernel_imp(
-            &mut MilliPar {
-                mr,
-                nr,
-                sizeof,
-                hyper: 1,
-                microkernel_job: (0..c * max_j).map(|_| AtomicU8::new(0)).collect(),
-                pack_lhs_job: (0..max_i).map(|_| AtomicU8::new(0)).collect(),
-                pack_rhs_job: (0..max_j).map(|_| AtomicU8::new(0)).collect(),
-                finished: AtomicUsize::new(0),
-                n_threads,
-            },
-            microkernel,
-            pack,
-            mr,
-            nr,
-            { lhs }.0,
-            { packed_lhs }.0,
-            { rhs }.0,
-            { packed_rhs }.0,
-            nrows,
-            ncols,
-            row_chunk,
-            col_chunk,
-            lhs_rs,
-            rhs_cs,
-            packed_lhs_rs,
-            packed_rhs_cs,
-            row,
-            col,
-            pos,
-            { info }.0,
-        )
-    };
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum InstrSet {
     Avx256,
@@ -1462,8 +1384,7 @@ pub unsafe fn gemm(
         let dst_row_idx = ForceSync(dst_row_idx);
         let dst_col_idx = ForceSync(dst_col_idx);
         let alpha = ForceSync(alpha);
-
-        spindle::with_lock(n_threads, || {
+        let mut f = || {
             let mut k = 0;
             let mut beta = beta;
             while k < depth {
@@ -1616,7 +1537,16 @@ pub unsafe fn gemm(
                 k += kc;
                 beta = Accum::Add;
             }
-        });
+        };
+        if n_threads <= 1 {
+            f();
+        } else {
+            #[cfg(feature = "rayon")]
+            spindle::with_lock(n_threads, f);
+
+            #[cfg(not(feature = "rayon"))]
+            f();
+        }
     });
 }
 
@@ -1652,24 +1582,31 @@ pub unsafe fn kernel(
     info: &MicrokernelInfo,
 ) {
     unsafe {
-        let max_i = nrows.div_ceil(mr);
-        let max_j = ncols.div_ceil(nr);
-        let max_jobs = max_i * max_j;
-        let c = max_i;
         let mut seq = Milli { mr, nr, sizeof };
-        let mut par = MilliPar {
-            mr,
-            nr,
-            sizeof,
-            hyper: 1,
-            microkernel_job: (0..c * max_j).map(|_| AtomicU8::new(0)).collect(),
-            pack_lhs_job: (0..max_i).map(|_| AtomicU8::new(0)).collect(),
-            pack_rhs_job: (0..max_j).map(|_| AtomicU8::new(0)).collect(),
-            finished: AtomicUsize::new(0),
-            n_threads,
+        #[cfg(feature = "rayon")]
+        let mut par = {
+            let max_i = nrows.div_ceil(mr);
+            let max_j = ncols.div_ceil(nr);
+            let max_jobs = max_i * max_j;
+            let c = max_i;
+
+            MilliPar {
+                mr,
+                nr,
+                sizeof,
+                hyper: 1,
+                microkernel_job: (0..c * max_j).map(|_| AtomicU8::new(0)).collect(),
+                pack_lhs_job: (0..max_i).map(|_| AtomicU8::new(0)).collect(),
+                pack_rhs_job: (0..max_j).map(|_| AtomicU8::new(0)).collect(),
+                finished: AtomicUsize::new(0),
+                n_threads,
+            }
         };
         kernel_imp(
+            #[cfg(feature = "rayon")]
             if n_threads > 1 { &mut par } else { &mut seq },
+            #[cfg(not(feature = "rayon"))]
+            &mut seq,
             microkernel,
             pack,
             mr,

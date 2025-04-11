@@ -1,12 +1,12 @@
 use core::ptr::null;
 use std::collections::HashMap;
 
+use __gemm_x86__::*;
 use aligned_vec::avec;
 use diol::result::BenchResult;
 use diol::{Picoseconds, config::*, prelude::*};
 use faer::prelude::*;
 use faer::reborrow::*;
-use gemm_x86::*;
 use rand::prelude::*;
 
 fn bench_faer(bencher: Bencher, (m, n, k): (usize, usize, usize)) {

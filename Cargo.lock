@@ -3,6 +3,32 @@
 version = 4
 
 [[package]]
+name = "__gemm-x86__"
+version = "0.1.0"
+dependencies = [
+ "aligned-vec",
+ "blas-sys",
+ "bytemuck",
+ "crossbeam",
+ "defer",
+ "diol",
+ "faer",
+ "gemm 0.18.2",
+ "gemm-common 0.18.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "interpol",
+ "json",
+ "lapack-sys",
+ "openblas-src",
+ "openmp-sys",
+ "rand 0.9.0",
+ "raw-cpuid",
+ "rayon",
+ "serde_json",
+ "spindle",
+ "toml",
+]
+
+[[package]]
 name = "aarc"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -878,33 +904,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gemm-x86"
-version = "0.1.0"
-dependencies = [
- "aligned-vec",
- "blas-sys",
- "bytemuck",
- "crossbeam",
- "defer",
- "diol",
- "faer",
- "gemm 0.18.2",
- "gemm-common 0.18.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "interpol",
- "json",
- "lapack-sys",
- "once_cell",
- "openblas-src",
- "openmp-sys",
- "rand 0.9.0",
- "raw-cpuid",
- "rayon",
- "serde_json",
- "spindle",
- "toml",
-]
-
-[[package]]
 name = "generativity"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1359,9 +1358,6 @@ name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
-dependencies = [
- "portable-atomic",
-]
 
 [[package]]
 name = "openblas-build"
@@ -1553,12 +1549,6 @@ name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
-
-[[package]]
-name = "portable-atomic"
-version = "1.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "350e9b48cbc6b0e028b0473b114454c6316e57336ee184ceab6e53f72c178b3e"
 
 [[package]]
 name = "ppv-lite86"
