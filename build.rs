@@ -2486,11 +2486,6 @@ impl Target {
                                 neg!(rhs_neg_cs);
                                 add!(rhs, rhs_cs);
 
-                                reg!(diag_ptr);
-                                if diag {
-                                    mov!(diag_ptr, [info + INFO_DIAG_PTR]);
-                                }
-
                                 if mask && simd.dedicated_mask() {
                                     kmov!(k(1), [mask_ptr]);
                                 }
@@ -2499,44 +2494,30 @@ impl Target {
                                 let bcst = bits == 512 && m == 1 && !pack_rhs;
 
                                 for iter in 0..unroll {
-                                    let d = if diag { m * n * unroll + m } else { 0 };
-
-                                    if diag {
-                                        vbroadcast!(zmm(d), [diag_ptr]);
-
-                                        for i in 0..m {
-                                            if !mask || i + 1 < m {
+                                    for i in 0..m {
+                                        if !mask || i + 1 < m {
+                                            vmov!(
+                                                zmm(m * n * unroll + i),
+                                                [lhs + simd.sizeof() * i],
+                                            );
+                                        } else {
+                                            if simd.dedicated_mask() {
                                                 vmov!(
-                                                    zmm(m * n * unroll + i),
+                                                    zmm(m * n * unroll + i)[1],
                                                     [lhs + simd.sizeof() * i],
                                                 );
                                             } else {
-                                                if simd.dedicated_mask() {
-                                                    vmov!(
-                                                        zmm(m * n * unroll + i)[1],
-                                                        [lhs + simd.sizeof() * i],
-                                                    );
-                                                } else {
-                                                    vmov!(zmm(m * n * unroll + i), [mask_ptr]);
-                                                    vmov!(
-                                                        zmm(m * n * unroll + i)[m * n * unroll + i],
-                                                        [lhs + simd.sizeof() * i],
-                                                    );
-                                                }
-                                            }
-                                            if pack_lhs {
+                                                vmov!(zmm(m * n * unroll + i), [mask_ptr]);
                                                 vmov!(
-                                                    [packed_lhs + simd.sizeof() * i],
-                                                    zmm(m * n * unroll + i)
+                                                    zmm(m * n * unroll + i)[m * n * unroll + i],
+                                                    [lhs + simd.sizeof() * i],
                                                 );
                                             }
                                         }
-
-                                        for i in 0..m {
-                                            vmul!(
-                                                zmm(m * n * unroll + i),
-                                                zmm(d),
-                                                zmm(m * n * unroll + i),
+                                        if pack_lhs {
+                                            vmov!(
+                                                [packed_lhs + simd.sizeof() * i],
+                                                zmm(m * n * unroll + i)
                                             );
                                         }
                                     }
@@ -2575,50 +2556,6 @@ impl Target {
                                         }
 
                                         for i in 0..m {
-                                            if !diag && j == 0 {
-                                                if !mask || i + 1 < m {
-                                                    if diag {
-                                                        vmul!(
-                                                            zmm(m * n * unroll + i),
-                                                            zmm(d),
-                                                            [lhs + simd.sizeof() * i],
-                                                        );
-                                                    } else {
-                                                        vmov!(
-                                                            zmm(m * n * unroll + i),
-                                                            [lhs + simd.sizeof() * i],
-                                                        );
-                                                    }
-                                                } else {
-                                                    if simd.dedicated_mask() {
-                                                        vmov!(
-                                                            zmm(m * n * unroll + i)[1],
-                                                            [lhs + simd.sizeof() * i],
-                                                        );
-                                                    } else {
-                                                        vmov!(zmm(m * n * unroll + i), [mask_ptr]);
-                                                        vmov!(
-                                                            zmm(m * n * unroll + i)
-                                                                [m * n * unroll + i],
-                                                            [lhs + simd.sizeof() * i],
-                                                        );
-                                                    }
-                                                    if diag {
-                                                        vmul!(
-                                                            zmm(m * n * unroll + i),
-                                                            zmm(d),
-                                                            zmm(m * n * unroll + i),
-                                                        );
-                                                    }
-                                                }
-                                                if pack_lhs {
-                                                    assert!(!diag);
-                                                    vmov!(
-                                                        [packed_lhs + simd.sizeof() * i],
-                                                        zmm(m * n * unroll + i)
-                                                    );
-                                                }
-                                            }
                                             if bcst {
                                                 if conj {
                                                     vfma231_conj!(
@@ -2755,9 +2692,6 @@ impl Target {
                                             }
                                         }
                                     }
-                                }
-                                if diag {
-                                    add!(diag_ptr, [info + INFO_DIAG_STRIDE]);
                                 }
 
                                 if unroll == 1 {
@@ -3164,6 +3098,7 @@ impl Target {
                                 pop!(row);
                                 pop!(cs);
                                 pop!(rs);
+                                pop!(ptr);
                                 let f = &format!("{prefix}.epilogue{__mask__}{__add__}");
                                 jmp!("{func_name(f, suffix, false)}");
                             }

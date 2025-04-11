@@ -1,12 +1,12 @@
 use core::ptr::null;
 use std::collections::HashMap;
 
-use __gemm_x86__::*;
 use aligned_vec::avec;
 use diol::result::BenchResult;
-use diol::{Picoseconds, config::*, prelude::*};
+use diol::{config::*, prelude::*, Picoseconds};
 use faer::prelude::*;
 use faer::reborrow::*;
+use private_gemm_x86::*;
 use rand::prelude::*;
 
 fn bench_faer(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
@@ -41,14 +41,14 @@ fn bench_faer(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
             rhs,
             faer::linalg::matmul::triangular::BlockStructure::Rectangular,
             1.0,
-            Par::rayon(0),
+            Par::Seq,
         );
     });
 }
 
 fn bench_asm(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
     let rng = &mut StdRng::seed_from_u64(0);
-    let n_threads = rayon::current_num_threads();
+    let n_threads = 1;
 
     let mut cs = Ord::min(m.next_power_of_two(), m.next_multiple_of(8));
     if m > 48 {
@@ -62,7 +62,8 @@ fn bench_asm(bencher: Bencher, (m, n, k): (usize, usize, usize)) {
     rng.fill(lhs);
     rng.fill(rhs);
 
-    spindle::with_lock(n_threads, || {
+    // spindle::with_lock(n_threads, || {
+    ({
         bencher.bench(|| unsafe {
             gemm(
                 DType::F64,
@@ -100,7 +101,7 @@ fn main() -> eyre::Result<()> {
     config.plot_axis = PlotAxis::SemiLogX;
     let plot_dir = &config.plot_dir.0.take();
 
-    for k in [64, 128, 256, 512] {
+    for k in [8, 16, 32, 64, 128, 256, 512] {
         let mut args_small: [_; 16] = core::array::from_fn(|i| {
             let i = i as u32;
             if i % 2 == 0 {
@@ -115,9 +116,9 @@ fn main() -> eyre::Result<()> {
         let mut args_big: [_; 11] = core::array::from_fn(|i| {
             let i = i as u32;
             if i % 2 == 0 {
-                2usize.pow(9 + i / 2 as u32)
+                2usize.pow(3 + i / 2 as u32)
             } else {
-                3 * 2usize.pow(8 + i / 2 as u32)
+                3 * 2usize.pow(2 + i / 2 as u32)
             }
         });
         args_big.sort_unstable();
@@ -145,11 +146,14 @@ fn main() -> eyre::Result<()> {
                 args_big,
             );
             let results = bench.run()?.combine(
-                &serde_json::from_str(&std::fs::read_to_string(&format!(
-                    "{}/timings {}.json",
-                    concat!(env!("CARGO_MANIFEST_DIR")),
-                    bench.groups.borrow().keys().next().unwrap()
-                ))?)
+                &serde_json::from_str(
+                    &std::fs::read_to_string(&format!(
+                        "{}/timings {}.json",
+                        concat!(env!("CARGO_MANIFEST_DIR")),
+                        bench.groups.borrow().keys().next().unwrap()
+                    ))
+                    .unwrap_or(String::new()),
+                )
                 .unwrap_or(BenchResult {
                     groups: HashMap::new(),
                 }),
@@ -187,11 +191,14 @@ fn main() -> eyre::Result<()> {
                     args_big,
                 );
                 let results = bench.run()?.combine(
-                    &serde_json::from_str(&std::fs::read_to_string(&format!(
-                        "{}/timings {}.json",
-                        concat!(env!("CARGO_MANIFEST_DIR")),
-                        bench.groups.borrow().keys().next().unwrap()
-                    ))?)
+                    &serde_json::from_str(
+                        &std::fs::read_to_string(&format!(
+                            "{}/timings {}.json",
+                            concat!(env!("CARGO_MANIFEST_DIR")),
+                            bench.groups.borrow().keys().next().unwrap()
+                        ))
+                        .unwrap_or(String::new()),
+                    )
                     .unwrap_or(BenchResult {
                         groups: HashMap::new(),
                     }),
@@ -227,11 +234,14 @@ fn main() -> eyre::Result<()> {
                     args_big,
                 );
                 let results = bench.run()?.combine(
-                    &serde_json::from_str(&std::fs::read_to_string(&format!(
-                        "{}/timings {}.json",
-                        concat!(env!("CARGO_MANIFEST_DIR")),
-                        bench.groups.borrow().keys().next().unwrap()
-                    ))?)
+                    &serde_json::from_str(
+                        &std::fs::read_to_string(&format!(
+                            "{}/timings {}.json",
+                            concat!(env!("CARGO_MANIFEST_DIR")),
+                            bench.groups.borrow().keys().next().unwrap()
+                        ))
+                        .unwrap_or(String::new()),
+                    )
                     .unwrap_or(BenchResult {
                         groups: HashMap::new(),
                     }),

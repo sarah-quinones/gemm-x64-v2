@@ -154,6 +154,7 @@ fn cache_info() -> Option<[CacheInfo; 3]> {
                     for info in &mut all_info {
                         info.cache_bytes *= l1_shared_count;
                     }
+                    all_info[2].cache_bytes *= num_cpus::get_physical();
 
                     Ok(all_info)
                 }
@@ -171,13 +172,7 @@ fn cache_info() -> Option<[CacheInfo; 3]> {
                             let mut info = CACHE_INFO_DEFAULT;
                             for line in lscpu.lines().skip(1) {
                                 let mut iter = line.split_whitespace();
-                                if let [
-                                    Some(cache_type),
-                                    Some(level),
-                                    Some(ways),
-                                    Some(coherency_size),
-                                    Some(one_size),
-                                ] = [
+                                if let [Some(cache_type), Some(level), Some(ways), Some(coherency_size), Some(one_size)] = [
                                     iter.next(),
                                     iter.next(),
                                     iter.next(),

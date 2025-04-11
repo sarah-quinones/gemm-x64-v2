@@ -1315,7 +1315,11 @@ pub unsafe fn gemm(
             (F32_SIMD512x4.as_slice(), F32_SIMDpack_512.as_slice(), 96, 4)
         }
         (InstrSet::Avx512, DType::F64) => {
-            (F64_SIMD512x4.as_slice(), F64_SIMDpack_512.as_slice(), 48, 4)
+            if nrows > 48 {
+                (F64_SIMD512x4.as_slice(), F64_SIMDpack_512.as_slice(), 48, 4)
+            } else {
+                (F64_SIMD512x8.as_slice(), F64_SIMDpack_512.as_slice(), 24, 8)
+            }
         }
         (InstrSet::Avx512, DType::C32) => {
             (C32_SIMD512x4.as_slice(), C32_SIMDpack_512.as_slice(), 48, 4)
@@ -1341,12 +1345,13 @@ pub unsafe fn gemm(
     let rhs_cs = rhs_cs * sizeof as isize;
     let dst_rs = dst_rs * sizeof as isize;
     let dst_cs = dst_cs * sizeof as isize;
+    let real_diag_stride = real_diag_stride * sizeof as isize;
 
     let cache = *cache::CACHE_INFO;
 
     let l1 = cache[0].cache_bytes / sizeof;
     let l2 = cache[1].cache_bytes / sizeof;
-    let l3 = cache[2].cache_bytes / sizeof * n_threads / 2;
+    let l3 = cache[2].cache_bytes / sizeof;
 
     #[repr(align(4096))]
     struct Page([u8; 4096]);
@@ -1357,7 +1362,7 @@ pub unsafe fn gemm(
     thread_local! {
         static MEM: RefCell<Vec::<core::mem::MaybeUninit<Page>>> = {
             let cache = *cache::CACHE_INFO;
-            let l3 = cache[2].cache_bytes * rayon::current_num_threads() / 2;
+            let l3 = cache[2].cache_bytes ;
 
             let lhs_size = l3.div_ceil(size_of::<Page>());
             let rhs_size = l3.div_ceil(size_of::<Page>());
@@ -1395,8 +1400,96 @@ pub unsafe fn gemm(
                 let l3 = l3 / 64 / f;
 
                 let tall = m >= 3 * n / 2 && m >= l3;
-                let pack_lhs = (n > 6 * nr && tall) || (n > 6 * nr * n_threads);
+                let pack_lhs =
+                    !real_diag.0.is_null() || (n > 6 * nr && tall) || (n > 3 * nr * n_threads);
                 let pack_rhs = tall;
+
+                let rowmajor = if n_threads > 1 {
+                    false
+                } else if tall {
+                    true
+                } else {
+                    false
+                };
+
+                let info = MicrokernelInfo {
+                    flags: match beta {
+                        Accum::Replace => 0,
+                        Accum::Add => FLAGS_ACCUM,
+                    } | if conj_lhs { FLAGS_CONJ_LHS } else { 0 }
+                        | if conj_lhs != conj_rhs {
+                            FLAGS_CONJ_NEQ
+                        } else {
+                            0
+                        }
+                        | match itype {
+                            IType::U32 => FLAGS_32BIT_IDX,
+                            IType::U64 => 0,
+                        }
+                        | if cplx { FLAGS_CPLX } else { 0 }
+                        | match dst_kind {
+                            DstKind::Lower => FLAGS_LOWER,
+                            DstKind::Upper => FLAGS_UPPER,
+                            DstKind::Full => 0,
+                        }
+                        | if rowmajor { FLAGS_ROWMAJOR } else { 0 },
+                    depth: kc,
+                    lhs_rs,
+                    lhs_cs,
+                    rhs_rs,
+                    rhs_cs,
+                    alpha: { alpha }.0,
+                    ptr: { dst }.0,
+                    rs: dst_rs,
+                    cs: dst_cs,
+                    row_idx: { dst_row_idx }.0,
+                    col_idx: { dst_col_idx }.0,
+                    diag_ptr: { real_diag }.0,
+                    diag_stride: real_diag_stride,
+                };
+
+                if !rowmajor && m < l2 && n < l2 {
+                    let microkernel = microkernel[nr - 1];
+                    let pack = pack[0];
+                    millikernel_colmajor(
+                        microkernel,
+                        pack,
+                        mr,
+                        nr,
+                        sizeof,
+                        { lhs }.0,
+                        if pack_lhs {
+                            packed_lhs.as_mut_ptr() as _
+                        } else {
+                            { lhs }.0 as _
+                        },
+                        { rhs }.0,
+                        if pack_rhs {
+                            packed_rhs.as_mut_ptr() as _
+                        } else {
+                            { rhs }.0 as _
+                        },
+                        nrows,
+                        ncols,
+                        &MillikernelInfo {
+                            lhs_rs: lhs_rs * mr as isize,
+                            packed_lhs_rs: if pack_lhs {
+                                (sizeof * mr * kc) as isize
+                            } else {
+                                lhs_rs * mr as isize
+                            },
+                            rhs_cs: rhs_cs * nr as isize,
+                            packed_rhs_cs: if pack_rhs {
+                                (sizeof * nr * kc) as isize
+                            } else {
+                                rhs_cs * nr as isize
+                            },
+                            micro: info,
+                        },
+                        &mut Position { row: 0, col: 0 },
+                    );
+                    return;
+                }
 
                 let (row_chunk, col_chunk, rowmajor) = if n_threads > 1 {
                     (
@@ -1405,18 +1498,18 @@ pub unsafe fn gemm(
                         [n, n, n, l3, nr],
                         false,
                     )
-                } else if tall {
+                } else if true {
                     (
                         //
-                        [m, l3, l3 / 2, l1, mr],
-                        [n, l3, l3 / 2, l2, nr],
+                        [m, l3, l2, l2 / 2, mr],
+                        [n, 2 * l3, l3 / 2, l2, nr],
                         true,
                     )
                 } else {
                     (
                         //
-                        [2 * l3, l3, l3 / 2, l2, mr],
-                        [l3, l3 / 2, l3 / 4, l1, nr],
+                        [2 * l3, l3 / 2, l3 / 2, l2, mr],
+                        [l3, l3 / 2, l2 / 2, l1, nr],
                         false,
                     )
                 };
@@ -1497,41 +1590,7 @@ pub unsafe fn gemm(
                         0,
                         0,
                         Position { row: 0, col: 0 },
-                        &MicrokernelInfo {
-                            flags: match beta {
-                                Accum::Replace => 0,
-                                Accum::Add => FLAGS_ACCUM,
-                            } | if conj_lhs { FLAGS_CONJ_LHS } else { 0 }
-                                | if conj_lhs != conj_rhs {
-                                    FLAGS_CONJ_NEQ
-                                } else {
-                                    0
-                                }
-                                | match itype {
-                                    IType::U32 => FLAGS_32BIT_IDX,
-                                    IType::U64 => 0,
-                                }
-                                | if cplx { FLAGS_CPLX } else { 0 }
-                                | match dst_kind {
-                                    DstKind::Lower => FLAGS_LOWER,
-                                    DstKind::Upper => FLAGS_UPPER,
-                                    DstKind::Full => 0,
-                                }
-                                | if rowmajor { FLAGS_ROWMAJOR } else { 0 },
-                            depth: kc,
-                            lhs_rs,
-                            lhs_cs,
-                            rhs_rs,
-                            rhs_cs,
-                            alpha: { alpha }.0,
-                            ptr: { dst }.0,
-                            rs: dst_rs,
-                            cs: dst_cs,
-                            row_idx: { dst_row_idx }.0,
-                            col_idx: { dst_col_idx }.0,
-                            diag_ptr: { real_diag }.0,
-                            diag_stride: real_diag_stride,
-                        },
+                        &info,
                     )
                 };
                 k += kc;
@@ -1584,27 +1643,32 @@ pub unsafe fn kernel(
     unsafe {
         let mut seq = Milli { mr, nr, sizeof };
         #[cfg(feature = "rayon")]
-        let mut par = {
-            let max_i = nrows.div_ceil(mr);
-            let max_j = ncols.div_ceil(nr);
-            let max_jobs = max_i * max_j;
-            let c = max_i;
-
-            MilliPar {
-                mr,
-                nr,
-                sizeof,
-                hyper: 1,
-                microkernel_job: (0..c * max_j).map(|_| AtomicU8::new(0)).collect(),
-                pack_lhs_job: (0..max_i).map(|_| AtomicU8::new(0)).collect(),
-                pack_rhs_job: (0..max_j).map(|_| AtomicU8::new(0)).collect(),
-                finished: AtomicUsize::new(0),
-                n_threads,
-            }
-        };
+        let mut par;
         kernel_imp(
             #[cfg(feature = "rayon")]
-            if n_threads > 1 { &mut par } else { &mut seq },
+            if n_threads > 1 {
+                par = {
+                    let max_i = nrows.div_ceil(mr);
+                    let max_j = ncols.div_ceil(nr);
+                    let max_jobs = max_i * max_j;
+                    let c = max_i;
+
+                    MilliPar {
+                        mr,
+                        nr,
+                        sizeof,
+                        hyper: 1,
+                        microkernel_job: (0..c * max_j).map(|_| AtomicU8::new(0)).collect(),
+                        pack_lhs_job: (0..max_i).map(|_| AtomicU8::new(0)).collect(),
+                        pack_rhs_job: (0..max_j).map(|_| AtomicU8::new(0)).collect(),
+                        finished: AtomicUsize::new(0),
+                        n_threads,
+                    }
+                };
+                &mut par
+            } else {
+                &mut seq
+            },
             #[cfg(not(feature = "rayon"))]
             &mut seq,
             microkernel,
