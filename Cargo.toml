@@ -1,5 +1,5 @@
 [package]
-name = "__gemm-x86__"
+name = "private-gemm-x86"
 version = "0.1.0"
 edition = "2021"
 authors = ["sarah quiñones <sarah@veganb.tw>"]
