@@ -70,9 +70,9 @@ macro_rules! func {
     ($name: tt) => {
         let __name__ = &format!($name);
 
-        asm!(".globl {QUOTE}{__name__}{QUOTE}");
+        asm!(".globl {__name__}");
         align!();
-        asm!("{QUOTE}{__name__}{QUOTE}:");
+        asm!("{__name__}:");
         defer!(asm!("ret"));
 
         macro_rules! name {
@@ -521,7 +521,7 @@ macro_rules! jmp {
     }};
     ($($label: tt)*) => {
         match format!($($label)*) {
-            label => asm!("jmp {QUOTE}{label}{QUOTE}"),
+            label => asm!("jmp {label}"),
         }
     };
 }
@@ -529,7 +529,7 @@ macro_rules! jmp {
 macro_rules! call {
     ($($label: tt)*) => {
         match format!($($label)*) {
-            label => asm!("call {QUOTE}{label}{QUOTE}"),
+            label => asm!("call {label}"),
         }
     };
 }
@@ -909,11 +909,74 @@ impl Ctx {
 }
 
 const VERSION_MAJOR: usize = 0;
-const VERSION_MINOR: usize = 22;
-const PREFIX: LazyLock<String> =
-    LazyLock::new(|| format!("[faer v{VERSION_MAJOR}.{VERSION_MINOR}]"));
+
+const PRETTY: LazyLock<bool> = LazyLock::new(|| false);
+const PREFIX: LazyLock<String> = LazyLock::new(|| {
+    if *PRETTY {
+        format!("[gemm.x86 v{VERSION_MAJOR}]")
+    } else {
+        format!("gemm_v{VERSION_MAJOR}")
+    }
+});
 const WORD: isize = 8;
 const QUOTE: char = '"';
+
+fn func_name(pieces: &str, params: &str, quote: bool) -> String {
+    let pieces = pieces.split('.').collect::<Vec<_>>();
+    let params = params
+        .split('.')
+        .filter_map(|p| {
+            if p.is_empty() {
+                return None;
+            }
+
+            let mut iter = p.split('=');
+            Some((iter.next().unwrap(), iter.next().unwrap()))
+        })
+        .collect::<Vec<_>>();
+
+    if *PRETTY {
+        let name = pieces
+            .iter()
+            .map(|i| i.as_ref())
+            .collect::<Vec<_>>()
+            .join(".");
+        let params = params
+            .iter()
+            .map(|(k, v)| format!("{k} = {v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        if params.is_empty() {
+            format!("{QUOTE}{*PREFIX} {name}{QUOTE}")
+        } else {
+            format!("{QUOTE}{*PREFIX} {name} [with {params}]{QUOTE}")
+        }
+    } else {
+        let name = pieces
+            .iter()
+            .map(|i| i.as_ref())
+            .collect::<Vec<_>>()
+            .join("_");
+        let params = params
+            .iter()
+            .map(|(k, v)| format!("{k}{v}"))
+            .collect::<Vec<_>>()
+            .join("_");
+
+        let name = if params.is_empty() {
+            format!("{*PREFIX}_{name}")
+        } else {
+            format!("{*PREFIX}_{name}_{params}")
+        };
+
+        if quote {
+            format!("{QUOTE}{name}{QUOTE}")
+        } else {
+            format!("{name}")
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Simd {
@@ -1028,7 +1091,7 @@ impl Display for Addr<'_> {
 
         if let Some(offset) = static_offset {
             assert_eq!(ptr, rip);
-            out = format!("{out} + {QUOTE}{offset}{QUOTE}");
+            out = format!("{out} + {offset}");
         }
 
         write!(f, "[{out}]")
@@ -1604,12 +1667,12 @@ impl Target {
 
         let ctx = Ctx::new();
         setup!(ctx, self);
-        let suffix = format!("[with m = {m * self.len()}]");
+        let suffix = &format!("m={m * self.len()}");
         let src = rax;
         let dst = r15;
         let nrows = r8;
         let info = rsi;
-        let prefix = format!("{*PREFIX} gemm.pack.rowmajor.{ty}.simd{bits}");
+        let prefix = &format!("gemm.pack.{ty}.simd{bits}");
 
         ctx[rsp].set(true);
         ctx[src].set(true);
@@ -1621,7 +1684,7 @@ impl Target {
         let need_mask = simd.sizeof() >= 16;
 
         let main = {
-            func!("{prefix} {suffix}");
+            func!("{func_name(prefix, &suffix, false)}");
             {
                 label!({
                     let good;
@@ -1629,7 +1692,8 @@ impl Target {
                 if m > 1 {
                     cmp!(nrows, (m - 1) * self.len() + 1);
                     jnc!(good);
-                    jmp!("{prefix} [with m = {(m - 1) * self.len()}]");
+                    let prev = &format!("m={(m - 1) * self.len()}");
+                    jmp!("{func_name(prefix, prev, false)}");
                 }
                 label!(good = _);
             }
@@ -1691,12 +1755,13 @@ impl Target {
                     if need_mask {
                         reg!(tmp);
                         {
-                            let prefix = format!("{*PREFIX} gemm.microkernel.{ty}.simd{bits}");
-
-                            lea!(
-                                tmp,
-                                [rip + &format!("{prefix}.mask.data") + 4 * self.mask_sizeof()]
+                            let name = func_name(
+                                &format!("gemm.microkernel.{ty}.simd{bits}.mask.data"),
+                                "",
+                                true,
                             );
+
+                            lea!(tmp, [rip + &name + 4 * self.mask_sizeof()]);
                         }
                         if self.mask_sizeof() <= 8 {
                             lea!(
@@ -1929,7 +1994,7 @@ impl Target {
         let ctx = Ctx::new();
         setup!(ctx, self);
 
-        let suffix = format!("[with m = {m * self.len()}, n = {n}]");
+        let suffix = &format!("m={m * self.len()}.n={n}");
         let lhs = rax;
         let packed_lhs = r15;
         let rhs = rcx;
@@ -1956,7 +2021,7 @@ impl Target {
         ctx[ncols].set(true);
         ctx[info].set(true);
 
-        let prefix = format!("{*PREFIX} gemm.microkernel.{ty}.simd{bits}");
+        let prefix = &format!("gemm.microkernel.{ty}.simd{bits}");
 
         let mask_ptr;
         let main = {
@@ -1973,18 +2038,20 @@ impl Target {
                     let prologue;
                 });
 
-                func!("{prefix} {suffix}");
+                func!("{func_name(prefix, suffix, false)}");
                 label!(row_check = _);
                 if m > 1 {
                     cmp!(nrows, (m - 1) * self.len() + 1);
                     jnc!(col_check);
-                    jmp!("{prefix} [with m = {(m - 1) * self.len()}, n = {n}]");
+                    let prev = &format!("m={(m - 1) * self.len()}.n={n}");
+                    jmp!("{func_name(prefix, prev, false)}");
                 }
                 label!(col_check = _);
                 if n > 1 {
                     cmp!(ncols, n);
                     jnc!(prologue);
-                    jmp!("{prefix} [with m = {m * self.len()}, n = {n - 1}]");
+                    let prev = &format!("m={m * self.len()}.n={n - 1}");
+                    jmp!("{func_name(prefix, prev, false)}");
                 }
                 label!(prologue = _);
 
@@ -2038,7 +2105,8 @@ impl Target {
                         reg!(tmp);
                         lea!(
                             tmp,
-                            [rip + &format!("{prefix}.mask.data") + 4 * self.mask_sizeof()]
+                            [rip + &func_name(&format!("{prefix}.mask.data"), "", false)
+                                + 4 * self.mask_sizeof()]
                         );
 
                         if self.mask_sizeof() <= 8 {
@@ -2121,13 +2189,15 @@ impl Target {
 
                     label!(load_noA = _);
                     {
-                        call!("{prefix}.load {suffix}");
+                        let f = &format!("{prefix}.load");
+                        call!("{func_name(f, suffix, false)}");
                         jmp!(epilogue);
                     }
 
                     label!(load_A = _);
                     {
-                        call!("{prefix}.load.packA {suffix}");
+                        let f = &format!("{prefix}.load.packA");
+                        call!("{func_name(f, suffix, false)}");
                         jmp!(epilogue);
                     }
                 }
@@ -2146,12 +2216,14 @@ impl Target {
 
                         label!(mask_noA = _);
                         {
-                            call!("{prefix}.mask {suffix}");
+                            let f = &format!("{prefix}.mask");
+                            call!("{func_name(f, suffix, false)}");
                             jmp!(epilogue);
                         }
                         label!(mask_A = _);
                         {
-                            call!("{prefix}.mask.packA {suffix}");
+                            let f = &format!("{prefix}.mask.packA");
+                            call!("{func_name(f, suffix, false)}");
                             jmp!(epilogue);
                         }
                     }
@@ -2167,11 +2239,19 @@ impl Target {
                     if self.is_cplx() {
                         vmov!(
                             zmm(alpha_re),
-                            [rip + &format!("{*PREFIX} gemm.microkernel.{ty}.flip.re.data")]
+                            [rip + &func_name(
+                                &format!("gemm.microkernel.{ty}.flip.re.data"),
+                                "",
+                                true
+                            )]
                         );
                         vmov!(
                             zmm(alpha_im),
-                            [rip + &format!("{*PREFIX} gemm.microkernel.{ty}.flip.im.data")]
+                            [rip + &func_name(
+                                &format!("gemm.microkernel.{ty}.flip.im.data"),
+                                "",
+                                true
+                            )]
                         );
                         label!({
                             let xor;
@@ -2269,14 +2349,17 @@ impl Target {
                         jnc!(epilogue_mask_overwrite);
 
                         label!(epilogue_mask_add = _);
-                        call!("{prefix}.epilogue.mask.add {suffix}");
+                        let f = &format!("{prefix}.epilogue.mask.add");
+                        call!("{func_name(f, suffix, false)}");
                         jmp!(end);
 
                         label!(epilogue_mask_overwrite = _);
-                        call!("{prefix}.epilogue.mask.overwrite {suffix}");
+                        let f = &format!("{prefix}.epilogue.mask.overwrite");
+                        call!("{func_name(f, suffix, false)}");
                         jmp!(end);
                     } else {
-                        call!("{prefix}.epilogue.any {suffix}");
+                        let f = &format!("{prefix}.epilogue.any");
+                        call!("{func_name(f, suffix, false)}");
                         jmp!(end);
                     }
                 }
@@ -2287,11 +2370,13 @@ impl Target {
                     jnc!(epilogue_store_overwrite);
 
                     label!(epilogue_store_add = _);
-                    call!("{prefix}.epilogue.store.add {suffix}");
+                    let f = &format!("{prefix}.epilogue.store.add");
+                    call!("{func_name(f, suffix, false)}");
                     jmp!(end);
 
                     label!(epilogue_store_overwrite = _);
-                    call!("{prefix}.epilogue.store.overwrite {suffix}");
+                    let f = &format!("{prefix}.epilogue.store.overwrite");
+                    call!("{func_name(f, suffix, false)}");
                     jmp!(end);
                 }
 
@@ -2301,11 +2386,13 @@ impl Target {
                     jnc!(epilogue_lower_overwrite);
 
                     label!(epilogue_lower_add = _);
-                    call!("{prefix}.epilogue.mask.lower.add {suffix}");
+                    let f = &format!("{prefix}.epilogue.mask.lower.add");
+                    call!("{func_name(f, suffix, false)}");
                     jmp!(end);
 
                     label!(epilogue_lower_overwrite = _);
-                    call!("{prefix}.epilogue.mask.lower.overwrite {suffix}");
+                    let f = &format!("{prefix}.epilogue.mask.lower.overwrite");
+                    call!("{func_name(f, suffix, false)}");
                     jmp!(end);
                 }
 
@@ -2315,17 +2402,20 @@ impl Target {
                     jnc!(epilogue_upper_overwrite);
 
                     label!(epilogue_upper_add = _);
-                    call!("{prefix}.epilogue.mask.upper.add {suffix}");
+                    let f = &format!("{prefix}.epilogue.mask.upper.add");
+                    call!("{func_name(f, suffix, false)}");
                     jmp!(end);
 
                     label!(epilogue_upper_overwrite = _);
-                    call!("{prefix}.epilogue.mask.upper.overwrite {suffix}");
+                    let f = &format!("{prefix}.epilogue.mask.upper.overwrite");
+                    call!("{func_name(f, suffix, false)}");
                     jmp!(end);
                 }
 
                 label!(epilogue_any = _);
                 {
-                    call!("{prefix}.epilogue.any {suffix}");
+                    let f = &format!("{prefix}.epilogue.any");
+                    call!("{func_name(f, suffix, false)}");
                     jmp!(end);
                 }
 
@@ -2364,9 +2454,10 @@ impl Target {
                             } {
                                 let __conj__ = if conj { ".conj" } else { "" };
 
-                                func!(
-                                    "{prefix}{__conj__}{__diag__}{__mask__}{__pack_lhs__}{__pack_rhs__} {suffix}"
+                                let f = &format!(
+                                    "{prefix}{__conj__}{__diag__}{__mask__}{__pack_lhs__}{__pack_rhs__}"
                                 );
+                                func!("{func_name(f, suffix, false)}");
                                 label!({
                                     let start0;
                                     let start1;
@@ -2375,9 +2466,11 @@ impl Target {
                                 if self.is_cplx() && !conj {
                                     bt!([info + INFO_FLAGS], flags_conj_diff);
                                     jnc!(start0);
-                                    jmp!(
-                                        "{prefix}.conj{__diag__}{__mask__}{__pack_lhs__}{__pack_rhs__} {suffix}"
+
+                                    let f = &format!(
+                                        "{prefix}.conj{__diag__}{__mask__}{__pack_lhs__}{__pack_rhs__}"
                                     );
+                                    jmp!("{func_name(f, suffix, false)}");
                                 }
                                 label!(start0 = _);
 
@@ -2693,7 +2786,8 @@ impl Target {
         };
 
         {
-            func!("{prefix}.epilogue.any {suffix}");
+            let f = &format!("{prefix}.epilogue.any");
+            func!("{func_name(f, suffix, false)}");
 
             reg!(stack);
             reg!(tmp);
@@ -2938,7 +3032,8 @@ impl Target {
                 for add in [false, true] {
                     let __add__ = if add { ".add" } else { ".overwrite" };
 
-                    func!("{prefix}.epilogue{__mask__}{__triangle__}{__add__} {suffix}");
+                    let f = &format!("{prefix}.epilogue{__mask__}{__triangle__}{__add__}");
+                    func!("{func_name(f, suffix, false)}");
                     label!({
                         let rowmajor;
                         let colmajor;
@@ -2979,9 +3074,9 @@ impl Target {
                                         alloca!(nrows);
                                         add!([position], self.len());
                                         sub!(nrows, self.len());
-                                        call!(
-                                            "{prefix}.epilogue{__mask__}{__triangle__}{__add__} [with m = {(m - 1) * self.len()}, n = {n}]"
-                                        );
+
+                                        let suffix = &format!("m={(m - 1) * self.len()}.n={n}");
+                                        call!("{func_name(f, suffix, false)}");
                                     }
                                     jmp!(end);
                                 } else {
@@ -3006,7 +3101,8 @@ impl Target {
                                 pop!(cs);
                                 pop!(rs);
                                 pop!(ptr);
-                                jmp!("{prefix}.epilogue{__mask__}{__add__} {suffix}");
+                                let f = &format!("{prefix}.epilogue{__mask__}{__add__}");
+                                jmp!("{func_name(f, suffix, false)}");
                             }
                             label!(cont = _);
                         }
@@ -3036,9 +3132,8 @@ impl Target {
                                         pop!(cs);
                                         pop!(rs);
                                         pop!(ptr);
-                                        jmp!(
-                                            "{prefix}.epilogue{__mask__}{__triangle__}{__add__} [with m = {(m - 1) * self.len()}, n = {n}]"
-                                        );
+                                        let suffix = &format!("m={(m - 1) * self.len()}.n={n}");
+                                        jmp!("{func_name(f, suffix, false)}");
                                     }
                                     jmp!(end);
                                 } else {
@@ -3063,8 +3158,8 @@ impl Target {
                                 pop!(row);
                                 pop!(cs);
                                 pop!(rs);
-                                pop!(ptr);
-                                jmp!("{prefix}.epilogue{__mask__}{__add__} {suffix}");
+                                let f = &format!("{prefix}.epilogue{__mask__}{__add__}");
+                                jmp!("{func_name(f, suffix, false)}");
                             }
                             label!(cont = _);
                             sub!(col, 1);
@@ -3085,7 +3180,8 @@ impl Target {
                             pop!(cs);
                             pop!(rs);
                             pop!(ptr);
-                            jmp!("{prefix}.epilogue.store{__triangle__}{__add__} {suffix}");
+                            let f = &format!("{prefix}.epilogue.store{__triangle__}{__add__}");
+                            jmp!("{func_name(f, suffix, false)}");
                         }
                         label!(cont = _);
                     }
@@ -3119,7 +3215,7 @@ impl Target {
                             jc!(load_mask);
                             lea!(
                                 mask_ptr,
-                                [rip + &format!("{prefix}.mask.data")
+                                [rip + &func_name(&format!("{prefix}.mask.data"), "", false)
                                     + (4 + self.len()) * self.mask_sizeof()]
                             );
 
@@ -3128,17 +3224,15 @@ impl Target {
                             if triangle == 0 {
                                 lea!(
                                     mask_ptr,
-                                    [rip + &format!("{prefix}.rmask.data")
+                                    [rip + &func_name(&format!("{prefix}.rmask.data"), "", false)
                                         + 4 * self.mask_sizeof()]
                                 );
                             }
                             if triangle == 1 {
                                 lea!(
                                     mask_ptr,
-                                    [
-                                        rip + &format!("{prefix}.mask.data")
-                                            + 4 * self.mask_sizeof()
-                                    ]
+                                    [rip + &func_name(&format!("{prefix}.mask.data"), "", false)
+                                        + 4 * self.mask_sizeof()]
                                 );
                             }
                         }
@@ -3271,6 +3365,7 @@ fn main() -> Result {
 
             for n in 1..=last {
                 let (name, f) = target.microkernel(m, n);
+
                 code += &f;
                 out.push(name);
             }
@@ -3400,10 +3495,15 @@ fn main() -> Result {
             (&pack_f64_simd64, Ty::F64, "pack_64"),
         ] {
             for (i, name) in names.iter().enumerate() {
+                let name = if name.starts_with(QUOTE) {
+                    name.clone()
+                } else {
+                    format!("{QUOTE}{name}{QUOTE}")
+                };
                 code += &format!(
                     "
                 unsafe extern {QUOTE}C{QUOTE} {{
-                    #[link_name = {QUOTE}{name}{QUOTE}]
+                    #[link_name = {name}]
                     unsafe fn __decl_{ty}_simd{bits}_{i}__();
                 }}
                 "
@@ -3432,7 +3532,7 @@ fn main() -> Result {
                     y
                 }}
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd128.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd128.mask.data\", \"\", true)})]
                  static __MASK_F32_128__: [::core::arch::x86_64::__m128i; 5 + 8] = unsafe {{::core::mem::transmute([
                     [ 0,  0,  0, 0i32],
                     [ 0,  0,  0,    0],
@@ -3449,7 +3549,7 @@ fn main() -> Result {
                     [-1, -1, -1,   -1],
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd256.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd256.mask.data\", \"\", true)})]
                  static __MASK_F32_256__: [::core::arch::x86_64::__m256i; 9 + 8] = unsafe {{::core::mem::transmute([
                     [ 0,  0,  0,  0,  0,  0,  0, 0i32],
                     [ 0,  0,  0,  0,  0,  0,  0,    0],
@@ -3470,7 +3570,7 @@ fn main() -> Result {
                     [-1, -1, -1, -1, -1, -1, -1,   -1],
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd512.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd512.mask.data\", \"\", true)})]
                  static __MASK_F32_512__: [u16; 17 + 8] = [
                     0b0000000000000000,
                     0b0000000000000000,
@@ -3499,7 +3599,7 @@ fn main() -> Result {
                     0b1111111111111111,
                 ];
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd128.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd128.mask.data\", \"\", true)})]
                  static __MASK_F64_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
                     [ 0, 0i64],
                     [ 0,    0],
@@ -3514,7 +3614,7 @@ fn main() -> Result {
                     [-1,   -1],
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd256.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd256.mask.data\", \"\", true)})]
                  static __MASK_F64_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
                     [ 0,  0,  0, 0i64],
                     [ 0,  0,  0,    0],
@@ -3531,7 +3631,7 @@ fn main() -> Result {
                     [-1, -1, -1,   -1],
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd512.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd512.mask.data\", \"\", true)})]
                  static __MASK_F64_512__: [u8; 9 + 8] = [
                     0b00000000,
                     0b00000000,
@@ -3552,7 +3652,7 @@ fn main() -> Result {
                     0b11111111,
                 ];
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd128.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd128.mask.data\", \"\", true)})]
                  static __MASK_C64_128__: [::core::arch::x86_64::__m128i; 2 + 8] = unsafe {{::core::mem::transmute([
                     [ 0, 0i64],
                     [ 0,    0],
@@ -3566,7 +3666,7 @@ fn main() -> Result {
                     [-1,   -1],
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd256.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd256.mask.data\", \"\", true)})]
                  static __MASK_C64_256__: [::core::arch::x86_64::__m256i; 3 + 8] = unsafe {{::core::mem::transmute([
                     [ 0,  0,  0, 0i64],
                     [ 0,  0,  0,    0],
@@ -3581,7 +3681,7 @@ fn main() -> Result {
                     [-1, -1, -1,   -1],
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd512.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd512.mask.data\", \"\", true)})]
                  static __MASK_C64_512__: [u8; 5 + 8] = [
                     0b00000000,
                     0b00000000,
@@ -3598,7 +3698,7 @@ fn main() -> Result {
                     0b11111111,
                 ];
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd128.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd128.mask.data\", \"\", true)})]
                  static __MASK_C32_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
                     [ 0,  0,  0, 0i32],
                     [ 0,  0,  0,    0],
@@ -3613,7 +3713,7 @@ fn main() -> Result {
                     [-1, -1, -1,   -1],
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd256.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd256.mask.data\", \"\", true)})]
                  static __MASK_C32_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
                     [ 0,  0,  0,  0,  0,  0,  0, 0i32],
                     [ 0,  0,  0,  0,  0,  0,  0,    0],
@@ -3630,7 +3730,7 @@ fn main() -> Result {
                     [-1, -1, -1, -1, -1, -1, -1,   -1],
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd512.mask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd512.mask.data\", \"\", true)})]
                  static __MASK_C32_512__: [u16; 9 + 8] = [
                     0b0000000000000000,
                     0b0000000000000000,
@@ -3651,7 +3751,7 @@ fn main() -> Result {
                     0b1111111111111111,
                 ];
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd128.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd128.rmask.data\", \"\", true)})]
                  static __rMASK_F32_128__: [::core::arch::x86_64::__m128i; 5 + 8] = unsafe {{::core::mem::transmute([
                     reverse([ 0,  0,  0, 0i32]),
                     reverse([ 0,  0,  0,    0]),
@@ -3668,7 +3768,7 @@ fn main() -> Result {
                     reverse([-1, -1, -1,   -1]),
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd256.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd256.rmask.data\", \"\", true)})]
                  static __rMASK_F32_256__: [::core::arch::x86_64::__m256i; 9 + 8] = unsafe {{::core::mem::transmute([
                     reverse([ 0,  0,  0,  0,  0,  0,  0, 0i32]),
                     reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
@@ -3689,7 +3789,7 @@ fn main() -> Result {
                     reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f32.simd512.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd512.rmask.data\", \"\", true)})]
                  static __rMASK_F32_512__: [u16; 17 + 8] = [
                     0b0000000000000000u16.reverse_bits(),
                     0b0000000000000000u16.reverse_bits(),
@@ -3718,7 +3818,7 @@ fn main() -> Result {
                     0b1111111111111111u16.reverse_bits(),
                 ];
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd128.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd128.rmask.data\", \"\", true)})]
                  static __rMASK_F64_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
                     reverse([ 0, 0i64]),
                     reverse([ 0,    0]),
@@ -3733,7 +3833,7 @@ fn main() -> Result {
                     reverse([-1,   -1]),
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd256.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd256.rmask.data\", \"\", true)})]
                  static __rMASK_F64_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
                     reverse([ 0,  0,  0, 0i64]),
                     reverse([ 0,  0,  0,    0]),
@@ -3750,7 +3850,7 @@ fn main() -> Result {
                     reverse([-1, -1, -1,   -1]),
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.f64.simd512.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd512.rmask.data\", \"\", true)})]
                  static __rMASK_F64_512__: [u8; 9 + 8] = [
                     0b00000000u8.reverse_bits(),
                     0b00000000u8.reverse_bits(),
@@ -3771,7 +3871,7 @@ fn main() -> Result {
                     0b11111111u8.reverse_bits(),
                 ];
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd128.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd128.rmask.data\", \"\", true)})]
                  static __rMASK_C64_128__: [::core::arch::x86_64::__m128i; 2 + 8] = unsafe {{::core::mem::transmute([
                     reverse([ 0, 0i64]),
                     reverse([ 0,    0]),
@@ -3785,7 +3885,7 @@ fn main() -> Result {
                     reverse([-1,   -1]),
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd256.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd256.rmask.data\", \"\", true)})]
                  static __rMASK_C64_256__: [::core::arch::x86_64::__m256i; 3 + 8] = unsafe {{::core::mem::transmute([
                     reverse([ 0,  0,  0, 0i64]),
                     reverse([ 0,  0,  0,    0]),
@@ -3800,7 +3900,7 @@ fn main() -> Result {
                     reverse([-1, -1, -1,   -1]),
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.simd512.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd512.rmask.data\", \"\", true)})]
                  static __rMASK_C64_512__: [u8; 5 + 8] = [
                     0b00000000u8.reverse_bits(),
                     0b00000000u8.reverse_bits(),
@@ -3817,7 +3917,7 @@ fn main() -> Result {
                     0b11111111u8.reverse_bits(),
                 ];
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd128.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd128.rmask.data\", \"\", true)})]
                  static __rMASK_C32_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
                     reverse([ 0,  0,  0, 0i32]),
                     reverse([ 0,  0,  0,    0]),
@@ -3832,7 +3932,7 @@ fn main() -> Result {
                     reverse([-1, -1, -1,   -1]),
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd256.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd256.rmask.data\", \"\", true)})]
                  static __rMASK_C32_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
                     reverse([ 0,  0,  0,  0,  0,  0,  0, 0i32]),
                     reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
@@ -3849,7 +3949,7 @@ fn main() -> Result {
                     reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.simd512.rmask.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd512.rmask.data\", \"\", true)})]
                  static __rMASK_C32_512__: [u16; 9 + 8] = [
                     0b0000000000000000u16.reverse_bits(),
                     0b0000000000000000u16.reverse_bits(),
@@ -3870,22 +3970,22 @@ fn main() -> Result {
                     0b1111111111111111u16.reverse_bits(),
                 ];
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.flip.re.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.flip.re.data\", \"\", true)})]
                  static __FLIP_RE_C32__: ::core::arch::x86_64::__m512i = unsafe {{::core::mem::transmute([
                     [i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0],
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.flip.re.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.flip.re.data\", \"\", true)})]
                  static __FLIP_RE_C64__: ::core::arch::x86_64::__m512i = unsafe {{::core::mem::transmute([
                     [i64::MIN, 0, i64::MIN, 0, i64::MIN, 0, i64::MIN, 0],
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c32.flip.im.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.flip.im.data\", \"\", true)})]
                  static __FLIP_IM_C32__: ::core::arch::x86_64::__m512i = unsafe {{::core::mem::transmute([
                     [0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN],
                 ])}};
 
-                #[unsafe(export_name = {QUOTE}{*PREFIX} gemm.microkernel.c64.flip.im.data{QUOTE})]
+                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.flip.im.data\", \"\", true)})]
                  static __FLIP_IM_C64__: ::core::arch::x86_64::__m512i = unsafe {{::core::mem::transmute([
                     [0, i64::MIN, 0, i64::MIN, 0, i64::MIN, 0, i64::MIN],
                 ])}};

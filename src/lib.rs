@@ -1463,8 +1463,7 @@ pub unsafe fn gemm(
         let dst_col_idx = ForceSync(dst_col_idx);
         let alpha = ForceSync(alpha);
 
-        // spindle::with_lock(n_threads, || {
-        ({
+        spindle::with_lock(n_threads, || {
             let mut k = 0;
             let mut beta = beta;
             while k < depth {
