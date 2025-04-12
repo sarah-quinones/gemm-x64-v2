@@ -3070,6 +3070,13 @@ impl Target {
                                 let cont;
                             });
 
+                            // x x x
+                            // 0 x x
+                            // 0 0 x
+                            // 0 0[0] // row + (m - 1) * simd_len > col + ncols - 1 => col - row < (m - 1) * simd_len - (ncols - 1)
+                            // 0 0 0
+                            // 0 0 0
+                            // col - row <
                             cmp!(col, (m - 1) * self.len() - (n - 1));
                             jnl!(cont);
 
@@ -3081,6 +3088,7 @@ impl Target {
                                                 vmov!(zmm(i + (m - 1) * j), zmm(i + m * j));
                                             }
                                         }
+
                                         pop!(col);
                                         pop!(row);
                                         pop!(cs);
@@ -3088,8 +3096,8 @@ impl Target {
                                         pop!(ptr);
                                         let suffix = &format!("m={(m - 1) * self.len()}.n={n}");
                                         jmp!("{func_name(f, suffix, false)}");
+                                        abort!();
                                     }
-                                    jmp!(end);
                                 } else {
                                     jmp!(end);
                                 }
@@ -3115,6 +3123,7 @@ impl Target {
                                 pop!(ptr);
                                 let f = &format!("{prefix}.epilogue{__mask__}{__add__}");
                                 jmp!("{func_name(f, suffix, false)}");
+                                abort!();
                             }
                             label!(cont = _);
                             sub!(col, 1);
@@ -3164,18 +3173,47 @@ impl Target {
                         if mask {
                             label!({
                                 let load_mask;
+                                let cont;
                             });
 
                             cmp!(nrows, m * self.len());
                             jc!(load_mask);
+
                             lea!(
                                 mask_ptr,
                                 [rip + &func_name(&format!("{prefix}.mask.data"), "", false)
                                     + (4 + self.len()) * self.mask_sizeof()]
                             );
+                            kmov!(k(mask_), [mask_ptr]);
+                            jmp!(cont);
 
                             label!(load_mask = _);
-                            kmov!(k(mask_), [mask_ptr]);
+
+                            lea!(
+                                mask_ptr,
+                                [rip + &func_name(&format!("{prefix}.mask.data"), "", false)
+                                    + 4 * self.mask_sizeof()]
+                            );
+
+                            if self.mask_sizeof() <= 8 {
+                                kmov!(
+                                    k(mask_),
+                                    [mask_ptr
+                                        + self.mask_sizeof() * nrows
+                                        + -(m - 1) * self.len() * self.mask_sizeof()]
+                                );
+                            } else {
+                                lea!(mask_ptr, [mask_ptr + 8 * nrows]);
+                                kmov!(
+                                    k(mask_),
+                                    [mask_ptr
+                                        + 8 * nrows
+                                        + -(m - 1) * self.len() * self.mask_sizeof()]
+                                );
+                            }
+
+                            label!(cont = _);
+
                             if triangle == 0 {
                                 lea!(
                                     mask_ptr,
@@ -3197,7 +3235,10 @@ impl Target {
                                 let src = m * j + i;
                                 let ptr = ptr + simd.sizeof() * i;
 
-                                if (!mask || i + 1 < m) && (triangle == 2 || i > 0) {
+                                if (!mask || i + 1 < m)
+                                    && (triangle != 0 || i > 0)
+                                    && (triangle != 1 || i + 1 < m)
+                                {
                                     if add {
                                         vadd!(zmm(src), zmm(src), [ptr]);
                                     }
@@ -3215,10 +3256,13 @@ impl Target {
                                         }
 
                                         mask2_
-                                    } else if triangle == 1 && i == 0 {
+                                    } else if triangle == 1 && i + 1 == m {
                                         kmov!(
                                             k(mask2_),
-                                            [mask_ptr + 1 * diff + self.mask_sizeof() * (j + 1)]
+                                            [mask_ptr
+                                                + 1 * diff
+                                                + self.mask_sizeof()
+                                                    * (j + 1 - (m - 1) * self.len())]
                                         );
                                         if i + 1 == m {
                                             kand!(k(mask2_), k(mask2_), k(mask_));
