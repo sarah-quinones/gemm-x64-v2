@@ -1877,78 +1877,80 @@ mod tests_f64 {
         let sizeof = size_of::<f64>() as isize;
         let len = 64 / size_of::<f64>();
 
-        for pack_lhs in [false, true] {
-            for pack_rhs in [false] {
-                for alpha in [1.0.into(), 0.0.into(), 2.5.into()] {
-                    let alpha: f64 = alpha;
-                    for m in (1..=48usize).chain([513]) {
-                        for n in (1..=4usize).chain([512]) {
-                            for cs in [m.next_multiple_of(48)] {
-                                let acs = m.next_multiple_of(48);
-                                let k = 513usize;
+        for instr in [InstrSet::Avx256, InstrSet::Avx512] {
+            for pack_lhs in [false, true] {
+                for pack_rhs in [false] {
+                    for alpha in [1.0.into(), 0.0.into(), 2.5.into()] {
+                        let alpha: f64 = alpha;
+                        for m in (1..=48usize).chain([513]) {
+                            for n in (1..=4usize).chain([512]) {
+                                for cs in [m.next_multiple_of(48)] {
+                                    let acs = m.next_multiple_of(48);
+                                    let k = 513usize;
 
-                                let packed_lhs: &mut [f64] = &mut *avec![0.0.into(); acs * k];
-                                let packed_rhs: &mut [f64] =
-                                    &mut *avec![0.0.into(); n.next_multiple_of(4) * k];
-                                let lhs: &mut [f64] = &mut *avec![0.0.into(); cs * k];
-                                let rhs: &mut [f64] = &mut *avec![0.0.into(); n * k];
-                                let dst: &mut [f64] = &mut *avec![0.0.into(); cs * n];
-                                let target = &mut *avec![0.0.into(); cs * n];
+                                    let packed_lhs: &mut [f64] = &mut *avec![0.0.into(); acs * k];
+                                    let packed_rhs: &mut [f64] =
+                                        &mut *avec![0.0.into(); n.next_multiple_of(4) * k];
+                                    let lhs: &mut [f64] = &mut *avec![0.0.into(); cs * k];
+                                    let rhs: &mut [f64] = &mut *avec![0.0.into(); n * k];
+                                    let dst: &mut [f64] = &mut *avec![0.0.into(); cs * n];
+                                    let target = &mut *avec![0.0.into(); cs * n];
 
-                                rng.fill(lhs);
-                                rng.fill(rhs);
+                                    rng.fill(lhs);
+                                    rng.fill(rhs);
 
-                                for i in 0..m {
-                                    for j in 0..n {
-                                        let target = &mut target[i + cs * j];
-                                        let mut acc = 0.0.into();
-                                        for depth in 0..k {
-                                            acc = f64::mul_add(
-                                                lhs[i + cs * depth],
-                                                rhs[depth + k * j],
-                                                acc,
-                                            );
+                                    for i in 0..m {
+                                        for j in 0..n {
+                                            let target = &mut target[i + cs * j];
+                                            let mut acc = 0.0.into();
+                                            for depth in 0..k {
+                                                acc = f64::mul_add(
+                                                    lhs[i + cs * depth],
+                                                    rhs[depth + k * j],
+                                                    acc,
+                                                );
+                                            }
+                                            *target = f64::mul_add(acc, alpha, *target);
                                         }
-                                        *target = f64::mul_add(acc, alpha, *target);
                                     }
-                                }
 
-                                unsafe {
-                                    gemm(
-                                        DType::F64,
-                                        IType::U64,
-                                        InstrSet::Avx512,
-                                        m,
-                                        n,
-                                        k,
-                                        dst.as_mut_ptr() as _,
-                                        1,
-                                        cs as isize,
-                                        null(),
-                                        null(),
-                                        DstKind::Full,
-                                        Accum::Add,
-                                        lhs.as_ptr() as _,
-                                        1,
-                                        cs as isize,
-                                        false,
-                                        null(),
-                                        0,
-                                        rhs.as_ptr() as _,
-                                        1,
-                                        k as isize,
-                                        false,
-                                        &raw const alpha as _,
-                                        1,
-                                    )
-                                };
-                                let mut i = 0;
-                                for (&target, &dst) in core::iter::zip(&*target, &*dst) {
-                                    if !((target - dst).abs() < 1e-6) {
-                                        dbg!(i / cs, i % cs, target, dst);
-                                        panic!();
+                                    unsafe {
+                                        gemm(
+                                            DType::F64,
+                                            IType::U64,
+                                            instr,
+                                            m,
+                                            n,
+                                            k,
+                                            dst.as_mut_ptr() as _,
+                                            1,
+                                            cs as isize,
+                                            null(),
+                                            null(),
+                                            DstKind::Full,
+                                            Accum::Add,
+                                            lhs.as_ptr() as _,
+                                            1,
+                                            cs as isize,
+                                            false,
+                                            null(),
+                                            0,
+                                            rhs.as_ptr() as _,
+                                            1,
+                                            k as isize,
+                                            false,
+                                            &raw const alpha as _,
+                                            1,
+                                        )
+                                    };
+                                    let mut i = 0;
+                                    for (&target, &dst) in core::iter::zip(&*target, &*dst) {
+                                        if !((target - dst).abs() < 1e-6) {
+                                            dbg!(i / cs, i % cs, target, dst);
+                                            panic!();
+                                        }
+                                        i += 1;
                                     }
-                                    i += 1;
                                 }
                             }
                         }
@@ -2704,6 +2706,158 @@ mod tests_c32_lower {
                                                     &mut MillikernelInfo {
                                                         lhs_rs: 48 * sizeof,
                                                         packed_lhs_rs: 48 * sizeof * k as isize,
+                                                        rhs_cs: 4 * sizeof * k as isize,
+                                                        packed_rhs_cs: 4 * sizeof * k as isize,
+                                                        micro: MicrokernelInfo {
+                                                            flags: ((conj_lhs as usize) << 1)
+                                                                | ((conj_different as usize) << 2)
+                                                                | (1 << 3),
+                                                            depth: k,
+                                                            lhs_rs: 1 * sizeof,
+                                                            lhs_cs: cs as isize * sizeof,
+                                                            rhs_rs: 1 * sizeof,
+                                                            rhs_cs: k as isize * sizeof,
+                                                            alpha: &raw const alpha as _,
+                                                            ptr: dst.as_mut_ptr() as _,
+                                                            rs: 1 * sizeof,
+                                                            cs: cs as isize * sizeof,
+                                                            row_idx: null_mut(),
+                                                            col_idx: null_mut(),
+                                                            diag_ptr: if diag_scale {
+                                                                diag.as_ptr() as *const ()
+                                                            } else {
+                                                                null()
+                                                            },
+                                                            diag_stride: if diag_scale {
+                                                                size_of::<f32>() as isize
+                                                            } else {
+                                                                0
+                                                            },
+                                                        },
+                                                    },
+                                                    &mut Position { row: 0, col: 0 },
+                                                )
+                                            };
+                                            let mut i = 0;
+                                            for (&target, &dst) in core::iter::zip(&*target, &*dst)
+                                            {
+                                                if !((target - dst).norm_sqr().sqrt() < 1e-4) {
+                                                    dbg!(i / cs, i % cs, target, dst);
+                                                    panic!();
+                                                }
+                                                i += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_avx256microkernel() {
+        let rng = &mut StdRng::seed_from_u64(0);
+
+        let sizeof = size_of::<c32>() as isize;
+        let len = 64 / size_of::<c32>();
+
+        for pack_lhs in [false, true] {
+            for pack_rhs in [false] {
+                for alpha in [
+                    1.0.into(),
+                    0.0.into(),
+                    c32::new(0.0, 3.5),
+                    c32::new(2.5, 3.5),
+                ] {
+                    let alpha: c32 = alpha;
+                    for m in 1..=127usize {
+                        for n in (1..=4usize).chain([8, 32]) {
+                            for cs in [m, m.next_multiple_of(len)] {
+                                for conj_lhs in [false, true] {
+                                    for conj_rhs in [false, true] {
+                                        for diag_scale in [false, true] {
+                                            if diag_scale && !pack_lhs {
+                                                continue;
+                                            }
+
+                                            let conj_different = conj_lhs != conj_rhs;
+
+                                            let acs = m.next_multiple_of(len);
+                                            let k = 1usize;
+
+                                            let packed_lhs: &mut [c32] =
+                                                &mut *avec![0.0.into(); acs * k];
+                                            let packed_rhs: &mut [c32] =
+                                                &mut *avec![0.0.into(); n.next_multiple_of(4) * k];
+                                            let lhs: &mut [c32] = &mut *avec![0.0.into(); cs * k];
+                                            let rhs: &mut [c32] = &mut *avec![0.0.into(); n * k];
+                                            let dst: &mut [c32] = &mut *avec![0.0.into(); cs * n];
+                                            let target: &mut [c32] =
+                                                &mut *avec![0.0.into(); cs * n];
+
+                                            let diag: &mut [f32] = &mut *avec![0.0.into(); k];
+
+                                            rng.fill(cast_slice_mut::<c32, f32>(lhs));
+                                            rng.fill(cast_slice_mut::<c32, f32>(rhs));
+                                            rng.fill(diag);
+
+                                            for i in 0..m {
+                                                for j in 0..n {
+                                                    if i < j {
+                                                        continue;
+                                                    }
+                                                    let target = &mut target[i + cs * j];
+                                                    let mut acc: c32 = 0.0.into();
+                                                    for depth in 0..k {
+                                                        let mut l = lhs[i + cs * depth];
+                                                        let mut r = rhs[depth + k * j];
+                                                        let d = diag[depth];
+
+                                                        if conj_lhs {
+                                                            l = l.conj();
+                                                        }
+                                                        if conj_rhs {
+                                                            r = r.conj();
+                                                        }
+
+                                                        if diag_scale {
+                                                            acc += d * l * r;
+                                                        } else {
+                                                            acc += l * r;
+                                                        }
+                                                    }
+                                                    *target = acc * alpha + *target;
+                                                }
+                                            }
+
+                                            unsafe {
+                                                millikernel_colmajor(
+                                                    C32_SIMD256[3],
+                                                    C32_SIMDpack_256[0],
+                                                    12,
+                                                    4,
+                                                    8,
+                                                    lhs.as_ptr() as _,
+                                                    if pack_lhs {
+                                                        packed_lhs.as_mut_ptr() as _
+                                                    } else {
+                                                        lhs.as_ptr() as _
+                                                    },
+                                                    rhs.as_ptr() as _,
+                                                    if pack_rhs {
+                                                        packed_rhs.as_mut_ptr() as _
+                                                    } else {
+                                                        rhs.as_ptr() as _
+                                                    },
+                                                    m,
+                                                    n,
+                                                    &mut MillikernelInfo {
+                                                        lhs_rs: 12 * sizeof,
+                                                        packed_lhs_rs: 12 * sizeof * k as isize,
                                                         rhs_cs: 4 * sizeof * k as isize,
                                                         packed_rhs_cs: 4 * sizeof * k as isize,
                                                         micro: MicrokernelInfo {

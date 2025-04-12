@@ -1776,8 +1776,13 @@ impl Target {
                                     + -(m - 1) * self.len() * self.mask_sizeof()]
                             );
                         } else {
-                            lea!(mask_ptr, [tmp + nrows * 8 + -(m - 1) * self.len() * 8]);
-                            lea!(mask_ptr, [tmp + nrows * 8 + -(m - 1) * self.len() * 8]);
+                            lea!(
+                                mask_ptr,
+                                [tmp + nrows * 8 + -(m - 1) * self.len() * self.mask_sizeof()]
+                            );
+                            for _ in 0..self.mask_sizeof() / 8 - 1 {
+                                lea!(mask_ptr, [mask_ptr + nrows * 8]);
+                            }
                         }
                         kmov!(k(2), [mask_ptr]);
                     }
@@ -2125,8 +2130,13 @@ impl Target {
                                     + self.len() * self.mask_sizeof()]
                             );
                         } else {
-                            lea!(mask_ptr, [tmp + nrows * 8 + self.len() * 8]);
-                            lea!(mask_ptr, [tmp + nrows * 8 + self.len() * 8]);
+                            lea!(
+                                mask_ptr,
+                                [tmp + nrows * 8 + self.len() * self.mask_sizeof()]
+                            );
+                            for _ in 0..self.mask_sizeof() / 8 - 1 {
+                                lea!(mask_ptr, [mask_ptr + nrows * 8]);
+                            }
                         }
                     }
                     label!(no_mask = _);
@@ -3203,7 +3213,9 @@ impl Target {
                                         + -(m - 1) * self.len() * self.mask_sizeof()]
                                 );
                             } else {
-                                lea!(mask_ptr, [mask_ptr + 8 * nrows]);
+                                for _ in 0..self.mask_sizeof() / 8 - 1 {
+                                    lea!(mask_ptr, [mask_ptr + 8 * nrows]);
+                                }
                                 kmov!(
                                     k(mask_),
                                     [mask_ptr
