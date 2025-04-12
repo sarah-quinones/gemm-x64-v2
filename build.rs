@@ -2437,100 +2437,133 @@ impl Target {
             ctx[lhs_rs].set(true);
             ctx[mask_ptr].set(true);
 
-            for diag in [false] {
-                let __diag__ = if diag { ".diag" } else { "" };
+            for mask in if need_mask {
+                vec![false, true]
+            } else {
+                vec![false]
+            } {
+                let __mask__ = if mask { ".mask" } else { ".load" };
 
-                for mask in if need_mask {
-                    vec![false, true]
-                } else {
-                    vec![false]
-                } {
-                    let __mask__ = if mask { ".mask" } else { ".load" };
+                for pack_lhs in [false, true] {
+                    let __pack_lhs__ = if pack_lhs { ".packA" } else { "" };
 
-                    for pack_lhs in [false, true] {
-                        let __pack_lhs__ = if pack_lhs { ".packA" } else { "" };
+                    for pack_rhs in [false] {
+                        let __pack_rhs__ = if pack_rhs { ".packB" } else { "" };
 
-                        for pack_rhs in [false] {
-                            let __pack_rhs__ = if pack_rhs { ".packB" } else { "" };
+                        for conj in if self.is_cplx() {
+                            vec![false, true]
+                        } else {
+                            vec![false]
+                        } {
+                            let __conj__ = if conj { ".conj" } else { "" };
 
-                            for conj in if self.is_cplx() {
-                                vec![false, true]
-                            } else {
-                                vec![false]
-                            } {
-                                let __conj__ = if conj { ".conj" } else { "" };
+                            let f = &format!(
+                                "{prefix}{__conj__}{__mask__}{__pack_lhs__}{__pack_rhs__}"
+                            );
+                            func!("{func_name(f, suffix, false)}");
+                            label!({
+                                let start0;
+                                let start1;
+                                let nanokernel;
+                            });
+                            if self.is_cplx() && !conj {
+                                bt!([info + INFO_FLAGS], flags_conj_diff);
+                                jnc!(start0);
 
-                                let f = &format!(
-                                    "{prefix}{__conj__}{__diag__}{__mask__}{__pack_lhs__}{__pack_rhs__}"
-                                );
-                                func!("{func_name(f, suffix, false)}");
-                                label!({
-                                    let start0;
-                                    let start1;
-                                    let nanokernel;
-                                });
-                                if self.is_cplx() && !conj {
-                                    bt!([info + INFO_FLAGS], flags_conj_diff);
-                                    jnc!(start0);
+                                let f =
+                                    &format!("{prefix}.conj{__mask__}{__pack_lhs__}{__pack_rhs__}");
+                                jmp!("{func_name(f, suffix, false)}");
+                            }
+                            label!(start0 = _);
 
-                                    let f = &format!(
-                                        "{prefix}.conj{__diag__}{__mask__}{__pack_lhs__}{__pack_rhs__}"
-                                    );
-                                    jmp!("{func_name(f, suffix, false)}");
-                                }
-                                label!(start0 = _);
+                            let rhs_neg_cs = lhs_rs;
 
-                                let rhs_neg_cs = lhs_rs;
+                            mov!(rhs_neg_cs, rhs_cs);
+                            neg!(rhs_neg_cs);
+                            add!(rhs, rhs_cs);
 
-                                mov!(rhs_neg_cs, rhs_cs);
-                                neg!(rhs_neg_cs);
-                                add!(rhs, rhs_cs);
+                            if mask && simd.dedicated_mask() {
+                                kmov!(k(1), [mask_ptr]);
+                            }
 
-                                if mask && simd.dedicated_mask() {
-                                    kmov!(k(1), [mask_ptr]);
-                                }
+                            label!(nanokernel = _);
+                            let bcst = bits == 512 && m == 1 && !pack_rhs;
 
-                                label!(nanokernel = _);
-                                let bcst = bits == 512 && m == 1 && !pack_rhs;
-
-                                for iter in 0..unroll {
-                                    for i in 0..m {
-                                        if !mask || i + 1 < m {
+                            for iter in 0..unroll {
+                                for i in 0..m {
+                                    if !mask || i + 1 < m {
+                                        vmov!(zmm(m * n * unroll + i), [lhs + simd.sizeof() * i],);
+                                    } else {
+                                        if simd.dedicated_mask() {
                                             vmov!(
-                                                zmm(m * n * unroll + i),
+                                                zmm(m * n * unroll + i)[1],
                                                 [lhs + simd.sizeof() * i],
                                             );
                                         } else {
-                                            if simd.dedicated_mask() {
-                                                vmov!(
-                                                    zmm(m * n * unroll + i)[1],
-                                                    [lhs + simd.sizeof() * i],
-                                                );
-                                            } else {
-                                                vmov!(zmm(m * n * unroll + i), [mask_ptr]);
-                                                vmov!(
-                                                    zmm(m * n * unroll + i)[m * n * unroll + i],
-                                                    [lhs + simd.sizeof() * i],
-                                                );
-                                            }
-                                        }
-                                        if pack_lhs {
+                                            vmov!(zmm(m * n * unroll + i), [mask_ptr]);
                                             vmov!(
-                                                [packed_lhs + simd.sizeof() * i],
-                                                zmm(m * n * unroll + i)
+                                                zmm(m * n * unroll + i)[m * n * unroll + i],
+                                                [lhs + simd.sizeof() * i],
                                             );
                                         }
                                     }
+                                    if pack_lhs {
+                                        vmov!(
+                                            [packed_lhs + simd.sizeof() * i],
+                                            zmm(m * n * unroll + i)
+                                        );
+                                    }
+                                }
 
-                                    for j in 0..n {
-                                        let rhs_addr = if j % 4 == 0 {
-                                            rhs + 1 * rhs_neg_cs
-                                        } else {
-                                            rhs + (j % 4 - 1) * rhs_cs
-                                        };
+                                for j in 0..n {
+                                    let rhs_addr = if j % 4 == 0 {
+                                        rhs + 1 * rhs_neg_cs
+                                    } else {
+                                        rhs + (j % 4 - 1) * rhs_cs
+                                    };
 
-                                        if !bcst {
-                                            vbroadcast!(zmm(m * n * unroll + m), [rhs_addr]);
+                                    if !bcst {
+                                        vbroadcast!(zmm(m * n * unroll + m), [rhs_addr]);
+                                        if self.is_real() && n > 4 {
+                                            if j + 1 == 4 {
+                                                lea!(rhs, [rhs + rhs_cs * 4]);
+                                            }
+                                        }
+
+                                        if self.is_real() && j + 1 == n {
+                                            if n > 4 {
+                                                lea!(rhs, [rhs + rhs_neg_cs * 4]);
+                                            }
+                                            add!(rhs, rhs_rs);
+                                        }
+                                    }
+
+                                    if pack_rhs {
+                                        vmovsr!(
+                                            [packed_rhs + j * ty.sizeof()],
+                                            xmm(m * n * unroll + m)
+                                        );
+                                        if self.is_real() && j + 1 == n {
+                                            add!(packed_rhs, n * ty.sizeof());
+                                        }
+                                    }
+
+                                    for i in 0..m {
+                                        if bcst {
+                                            if conj {
+                                                vfma231_conj!(
+                                                    zmm(m * n * iter + m * j + i),
+                                                    zmm(m * n * unroll + i),
+                                                    [rhs_addr],
+                                                );
+                                            } else {
+                                                vfma231!(
+                                                    zmm(m * n * iter + m * j + i),
+                                                    zmm(m * n * unroll + i),
+                                                    [rhs_addr],
+                                                );
+                                            }
+
                                             if self.is_real() && n > 4 {
                                                 if j + 1 == 4 {
                                                     lea!(rhs, [rhs + rhs_cs * 4]);
@@ -2543,19 +2576,69 @@ impl Target {
                                                 }
                                                 add!(rhs, rhs_rs);
                                             }
+                                        } else {
+                                            if conj {
+                                                vfma231_conj!(
+                                                    zmm(m * n * iter + m * j + i),
+                                                    zmm(m * n * unroll + i),
+                                                    zmm(m * n * unroll + m),
+                                                );
+                                            } else {
+                                                vfma231!(
+                                                    zmm(m * n * iter + m * j + i),
+                                                    zmm(m * n * unroll + i),
+                                                    zmm(m * n * unroll + m),
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    if j == 0 {
+                                        add!(lhs, lhs_cs);
+                                        if pack_lhs {
+                                            add!(packed_lhs, simd.sizeof() * m);
+                                        }
+                                    }
+                                }
+
+                                if self.is_cplx() {
+                                    for j in 0..n {
+                                        let rhs_addr = if j % 4 == 0 {
+                                            rhs + 1 * rhs_neg_cs + ty.sizeof() / 2
+                                        } else {
+                                            rhs + (j % 4 - 1) * rhs_cs + ty.sizeof() / 2
+                                        };
+
+                                        if !bcst {
+                                            vbroadcast!(zmm(m * n * unroll + m), [rhs_addr]);
+                                            if n > 4 {
+                                                if (j + 1) % 4 == 0 {
+                                                    lea!(rhs, [rhs + rhs_cs * 4]);
+                                                }
+                                            }
+
+                                            if j + 1 == n {
+                                                if n > 4 {
+                                                    lea!(rhs, [rhs + rhs_neg_cs * 4]);
+                                                }
+                                                add!(rhs, rhs_rs);
+                                            }
                                         }
 
                                         if pack_rhs {
                                             vmovsr!(
-                                                [packed_rhs + j * ty.sizeof()],
+                                                [packed_rhs + (j * ty.sizeof() + ty.sizeof() / 2)],
                                                 xmm(m * n * unroll + m)
                                             );
-                                            if self.is_real() && j + 1 == n {
+                                            if j + 1 == n {
                                                 add!(packed_rhs, n * ty.sizeof());
                                             }
                                         }
 
                                         for i in 0..m {
+                                            if j == 0 {
+                                                vswap!(zmm(m * n * unroll + i));
+                                            }
                                             if bcst {
                                                 if conj {
                                                     vfma231_conj!(
@@ -2571,13 +2654,13 @@ impl Target {
                                                     );
                                                 }
 
-                                                if self.is_real() && n > 4 {
+                                                if n > 4 {
                                                     if j + 1 == 4 {
                                                         lea!(rhs, [rhs + rhs_cs * 4]);
                                                     }
                                                 }
 
-                                                if self.is_real() && j + 1 == n {
+                                                if j + 1 == n {
                                                     if n > 4 {
                                                         lea!(rhs, [rhs + rhs_neg_cs * 4]);
                                                     }
@@ -2599,112 +2682,20 @@ impl Target {
                                                 }
                                             }
                                         }
-
-                                        if j == 0 {
-                                            add!(lhs, lhs_cs);
-                                            if pack_lhs {
-                                                add!(packed_lhs, simd.sizeof() * m);
-                                            }
-                                        }
-                                    }
-
-                                    if self.is_cplx() {
-                                        for j in 0..n {
-                                            let rhs_addr = if j % 4 == 0 {
-                                                rhs + 1 * rhs_neg_cs + ty.sizeof() / 2
-                                            } else {
-                                                rhs + (j % 4 - 1) * rhs_cs + ty.sizeof() / 2
-                                            };
-
-                                            if !bcst {
-                                                vbroadcast!(zmm(m * n * unroll + m), [rhs_addr]);
-                                                if n > 4 {
-                                                    if (j + 1) % 4 == 0 {
-                                                        lea!(rhs, [rhs + rhs_cs * 4]);
-                                                    }
-                                                }
-
-                                                if j + 1 == n {
-                                                    if n > 4 {
-                                                        lea!(rhs, [rhs + rhs_neg_cs * 4]);
-                                                    }
-                                                    add!(rhs, rhs_rs);
-                                                }
-                                            }
-
-                                            if pack_rhs {
-                                                vmovsr!(
-                                                    [packed_rhs
-                                                        + (j * ty.sizeof() + ty.sizeof() / 2)],
-                                                    xmm(m * n * unroll + m)
-                                                );
-                                                if j + 1 == n {
-                                                    add!(packed_rhs, n * ty.sizeof());
-                                                }
-                                            }
-
-                                            for i in 0..m {
-                                                if j == 0 {
-                                                    vswap!(zmm(m * n * unroll + i));
-                                                }
-                                                if bcst {
-                                                    if conj {
-                                                        vfma231_conj!(
-                                                            zmm(m * n * iter + m * j + i),
-                                                            zmm(m * n * unroll + i),
-                                                            [rhs_addr],
-                                                        );
-                                                    } else {
-                                                        vfma231!(
-                                                            zmm(m * n * iter + m * j + i),
-                                                            zmm(m * n * unroll + i),
-                                                            [rhs_addr],
-                                                        );
-                                                    }
-
-                                                    if n > 4 {
-                                                        if j + 1 == 4 {
-                                                            lea!(rhs, [rhs + rhs_cs * 4]);
-                                                        }
-                                                    }
-
-                                                    if j + 1 == n {
-                                                        if n > 4 {
-                                                            lea!(rhs, [rhs + rhs_neg_cs * 4]);
-                                                        }
-                                                        add!(rhs, rhs_rs);
-                                                    }
-                                                } else {
-                                                    if conj {
-                                                        vfma231_conj!(
-                                                            zmm(m * n * iter + m * j + i),
-                                                            zmm(m * n * unroll + i),
-                                                            zmm(m * n * unroll + m),
-                                                        );
-                                                    } else {
-                                                        vfma231!(
-                                                            zmm(m * n * iter + m * j + i),
-                                                            zmm(m * n * unroll + i),
-                                                            zmm(m * n * unroll + m),
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
                                     }
                                 }
+                            }
 
-                                if unroll == 1 {
-                                    dec!(depth);
-                                } else {
-                                    sub!(depth, unroll);
-                                }
-                                jnz!(nanokernel);
+                            if unroll == 1 {
+                                dec!(depth);
+                            } else {
+                                sub!(depth, unroll);
+                            }
+                            jnz!(nanokernel);
 
-                                for iter in 1..unroll {
-                                    for i in 0..m * n {
-                                        vadd!(zmm(i), zmm(i), zmm(m * n * iter + i));
-                                    }
+                            for iter in 1..unroll {
+                                for i in 0..m * n {
+                                    vadd!(zmm(i), zmm(i), zmm(m * n * iter + i));
                                 }
                             }
                         }

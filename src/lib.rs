@@ -1123,7 +1123,7 @@ unsafe fn kernel_imp(
                 let j_chunk = Ord::min(col_chunk, *ncols - *j);
                 let i_chunk = Ord::min(row_chunk, *nrows - *i);
 
-                if milli.micro.flags >> 63 == 0 {
+                if milli.micro.flags & FLAGS_ROWMAJOR == 0 {
                     *i += i_chunk;
                     *ii += 1;
                     if *i == *nrows {
@@ -1287,7 +1287,7 @@ pub unsafe fn gemm(
     conj_lhs: bool,
 
     real_diag: *const (),
-    real_diag_stride: isize,
+    diag_stride: isize,
 
     rhs: *const (),
     rhs_rs: isize,
@@ -1345,7 +1345,7 @@ pub unsafe fn gemm(
     let rhs_cs = rhs_cs * sizeof as isize;
     let dst_rs = dst_rs * sizeof as isize;
     let dst_cs = dst_cs * sizeof as isize;
-    let real_diag_stride = real_diag_stride * sizeof as isize;
+    let real_diag_stride = diag_stride * sizeof as isize;
 
     let cache = *cache::CACHE_INFO;
 
@@ -1373,7 +1373,21 @@ pub unsafe fn gemm(
         };
     }
 
-    MEM.with_borrow_mut(|mem| {
+    MEM.with(|mem| {
+        let mut storage;
+        let mut alloc;
+
+        let mem = match mem.try_borrow_mut() {
+            Ok(mem) => {
+                storage = mem;
+                &mut *storage
+            }
+            Err(_) => {
+                alloc = Vec::with_capacity(lhs_size + rhs_size);
+
+                &mut alloc
+            }
+        };
         if mem.len() < lhs_size + rhs_size {
             mem.reserve_exact(lhs_size + rhs_size);
             unsafe { mem.set_len(lhs_size + rhs_size) };
@@ -1400,8 +1414,10 @@ pub unsafe fn gemm(
                 let l3 = l3 / 64 / f;
 
                 let tall = m >= 3 * n / 2 && m >= l3;
-                let pack_lhs =
-                    !real_diag.0.is_null() || (n > 6 * nr && tall) || (n > 3 * nr * n_threads);
+                let pack_lhs = !real_diag.0.is_null()
+                    || (n > 6 * nr && tall)
+                    || (n > 3 * nr * n_threads)
+                    || lhs_rs != sizeof as isize;
                 let pack_rhs = tall;
 
                 let rowmajor = if n_threads > 1 {
@@ -1448,7 +1464,7 @@ pub unsafe fn gemm(
                     diag_stride: real_diag_stride,
                 };
 
-                if !rowmajor && m < l2 && n < l2 {
+                if n_threads <= 1 && !rowmajor && m < l2 && n < l2 {
                     let microkernel = microkernel[nr - 1];
                     let pack = pack[0];
                     millikernel_colmajor(
@@ -1514,7 +1530,8 @@ pub unsafe fn gemm(
                     )
                 };
 
-                let mut row_chunk = row_chunk.map(|r| r.next_multiple_of(16));
+                let mut row_chunk =
+                    row_chunk.map(|r| if r == mr { mr } else { r.next_multiple_of(16) });
                 let mut col_chunk = col_chunk.map(|c| c.next_multiple_of(nr));
 
                 let q = row_chunk.len();
@@ -1597,7 +1614,7 @@ pub unsafe fn gemm(
                 beta = Accum::Add;
             }
         };
-        if n_threads <= 1 {
+        if true || n_threads <= 1 {
             f();
         } else {
             #[cfg(feature = "rayon")]
@@ -2583,6 +2600,220 @@ mod tests_c32_lower {
                                             };
                                             let mut i = 0;
                                             for (&target, &dst) in core::iter::zip(&*target, &*dst)
+                                            {
+                                                if !((target - dst).norm_sqr().sqrt() < 1e-4) {
+                                                    dbg!(i / cs, i % cs, target, dst);
+                                                    panic!();
+                                                }
+                                                i += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_c32_lower_add {
+    use super::*;
+
+    use aligned_vec::*;
+    use bytemuck::*;
+    use core::ptr::null_mut;
+    use gemm::c64;
+    use rand::prelude::*;
+
+    #[test]
+    fn test_avx512_microkernel() {
+        let rng = &mut StdRng::seed_from_u64(0);
+
+        let sizeof = size_of::<c64>() as isize;
+        let len = 64 / size_of::<c64>();
+
+        for pack_lhs in [true, false] {
+            for pack_rhs in [false] {
+                for alpha in [
+                    1.0.into(),
+                    0.0.into(),
+                    c64::new(0.0, 3.5),
+                    c64::new(2.5, 3.5),
+                ] {
+                    let alpha: c64 = alpha;
+                    for m in 1..=127usize {
+                        for n in (1..=4usize).chain([8, 32, 1024]) {
+                            for cs in [m, m.next_multiple_of(len)] {
+                                for conj_lhs in [false, true] {
+                                    for conj_rhs in [false, true] {
+                                        for diag_scale in [false, true] {
+                                            if diag_scale && !pack_lhs {
+                                                continue;
+                                            }
+
+                                            let conj_different = conj_lhs != conj_rhs;
+
+                                            let acs = m.next_multiple_of(len);
+                                            let k = 1usize;
+
+                                            let packed_lhs: &mut [c64] =
+                                                &mut *avec![0.0.into(); acs * k];
+                                            let packed_rhs: &mut [c64] =
+                                                &mut *avec![0.0.into(); n.next_multiple_of(4) * k];
+                                            let lhs: &mut [c64] = &mut *avec![0.0.into(); cs * k];
+                                            let rhs: &mut [c64] = &mut *avec![0.0.into(); n * k];
+                                            let dst: &mut [c64] = &mut *avec![0.0.into(); cs * n];
+                                            // rng.fill(cast_slice_mut::<c64, f64>(dst));
+
+                                            let target0: &mut [c64] = &mut *dst.to_vec();
+                                            let target1: &mut [c64] = &mut *dst.to_vec();
+
+                                            let diag: &mut [c64] = &mut *avec![0.0.into(); k];
+
+                                            rng.fill(cast_slice_mut::<c64, f64>(lhs));
+                                            rng.fill(cast_slice_mut::<c64, f64>(rhs));
+                                            for x in &mut *diag {
+                                                // x.re = rng.random();
+                                                x.re = 2.0;
+                                            }
+
+                                            for i in 0..m {
+                                                for j in 0..n {
+                                                    if i < j {
+                                                        continue;
+                                                    }
+                                                    let target = &mut target0[i + cs * j];
+                                                    let mut acc: c64 = 0.0.into();
+                                                    for depth in 0..k {
+                                                        let mut l = lhs[i + cs * depth];
+                                                        let mut r = rhs[depth + k * j];
+                                                        let d = diag[depth];
+
+                                                        if conj_lhs {
+                                                            l = l.conj();
+                                                        }
+                                                        if conj_rhs {
+                                                            r = r.conj();
+                                                        }
+
+                                                        if diag_scale {
+                                                            acc += d * l * r;
+                                                        } else {
+                                                            acc += l * r;
+                                                        }
+                                                    }
+                                                    *target += acc * alpha;
+                                                }
+                                            }
+
+                                            unsafe {
+                                                millikernel_colmajor(
+                                                    C64_SIMD512x4[3],
+                                                    C64_SIMDpack_512[0],
+                                                    24,
+                                                    4,
+                                                    16,
+                                                    lhs.as_ptr() as _,
+                                                    if pack_lhs {
+                                                        packed_lhs.as_mut_ptr() as _
+                                                    } else {
+                                                        lhs.as_ptr() as _
+                                                    },
+                                                    rhs.as_ptr() as _,
+                                                    if pack_rhs {
+                                                        packed_rhs.as_mut_ptr() as _
+                                                    } else {
+                                                        rhs.as_ptr() as _
+                                                    },
+                                                    m,
+                                                    n,
+                                                    &mut MillikernelInfo {
+                                                        lhs_rs: 24 * sizeof,
+                                                        packed_lhs_rs: 24 * sizeof * k as isize,
+                                                        rhs_cs: 4 * sizeof * k as isize,
+                                                        packed_rhs_cs: 4 * sizeof * k as isize,
+                                                        micro: MicrokernelInfo {
+                                                            flags: 1
+                                                                | ((conj_lhs as usize) << 1)
+                                                                | ((conj_different as usize) << 2)
+                                                                | (1 << 3),
+                                                            depth: k,
+                                                            lhs_rs: 1 * sizeof,
+                                                            lhs_cs: cs as isize * sizeof,
+                                                            rhs_rs: 1 * sizeof,
+                                                            rhs_cs: k as isize * sizeof,
+                                                            alpha: &raw const alpha as _,
+                                                            ptr: target1.as_mut_ptr() as _,
+                                                            rs: 1 * sizeof,
+                                                            cs: cs as isize * sizeof,
+                                                            row_idx: null_mut(),
+                                                            col_idx: null_mut(),
+                                                            diag_ptr: if diag_scale {
+                                                                diag.as_ptr() as *const ()
+                                                            } else {
+                                                                null()
+                                                            },
+                                                            diag_stride: if diag_scale {
+                                                                size_of::<c64>() as isize
+                                                            } else {
+                                                                0
+                                                            },
+                                                        },
+                                                    },
+                                                    &mut Position { row: 0, col: 0 },
+                                                )
+                                            };
+                                            unsafe {
+                                                gemm(
+                                                    DType::C64,
+                                                    IType::U64,
+                                                    InstrSet::Avx512,
+                                                    m,
+                                                    n,
+                                                    k,
+                                                    dst.as_mut_ptr() as _,
+                                                    1,
+                                                    cs as isize,
+                                                    null(),
+                                                    null(),
+                                                    DstKind::Lower,
+                                                    Accum::Add,
+                                                    lhs.as_ptr() as _,
+                                                    1,
+                                                    cs as isize,
+                                                    conj_lhs,
+                                                    if diag_scale {
+                                                        diag.as_ptr() as _
+                                                    } else {
+                                                        null()
+                                                    },
+                                                    if diag_scale { 1 } else { 0 },
+                                                    rhs.as_ptr() as _,
+                                                    1,
+                                                    k as isize,
+                                                    conj_rhs,
+                                                    &raw const alpha as _,
+                                                    1,
+                                                )
+                                            };
+
+                                            let mut i = 0;
+                                            for (&target, &target1) in
+                                                core::iter::zip(&*target0, &*target1)
+                                            {
+                                                if !((target - target1).norm_sqr().sqrt() < 1e-4) {
+                                                    dbg!(i / cs, i % cs, target, target1);
+                                                    panic!();
+                                                }
+                                                i += 1;
+                                            }
+
+                                            let mut i = 0;
+                                            for (&target, &dst) in core::iter::zip(&*target0, &*dst)
                                             {
                                                 if !((target - dst).norm_sqr().sqrt() < 1e-4) {
                                                     dbg!(i / cs, i % cs, target, dst);
