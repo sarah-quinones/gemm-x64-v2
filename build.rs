@@ -340,6 +340,22 @@ macro_rules! cmovc {
     }};
 }
 
+macro_rules! cmovl {
+    ($dst: expr, $src: expr $(,)?) => {{
+        match ($dst, $src) {
+            (dst, src) => asm!("cmovl {dst}, {src}"),
+        }
+    }};
+}
+
+macro_rules! cmovg {
+    ($dst: expr, $src: expr $(,)?) => {{
+        match ($dst, $src) {
+            (dst, src) => asm!("cmovg {dst}, {src}"),
+        }
+    }};
+}
+
 macro_rules! mov {
     ([$dst: expr], $src: expr $(,)?) => {{
         match ($dst, $src) {
@@ -3242,40 +3258,50 @@ impl Target {
                             }
                         }
 
+                        let idk = 8usize.div_ceil(self.len() as usize) as isize;
+
                         for j in 0..n {
                             for i in 0..m {
                                 let src = m * j + i;
                                 let ptr = ptr + simd.sizeof() * i;
 
                                 if (!mask || i + 1 < m)
-                                    && (triangle != 0 || i > 0)
-                                    && (triangle != 1 || i + 1 < m)
+                                    && (triangle != 0 || i >= idk)
+                                    && (triangle != 1 || i + 1 <= m - idk)
                                 {
                                     if add {
                                         vadd!(zmm(src), zmm(src), [ptr]);
                                     }
                                     vmov!([ptr], zmm(src));
                                 } else {
-                                    let mask_ = if triangle == 0 && i == 0 {
-                                        kmov!(
-                                            k(mask2_),
-                                            [mask_ptr
-                                                + 1 * diff
-                                                + self.mask_sizeof() * (self.len() - j)],
+                                    let mask_ = if triangle == 0 && i < idk {
+                                        alloca!(diff);
+                                        reg!(tmp);
+                                        xor!(tmp, tmp);
+                                        add!(
+                                            diff,
+                                            self.mask_sizeof() * (self.len() + i * self.len() - j),
                                         );
+                                        mov!(tmp, self.mask_sizeof() * self.len());
+                                        cmp!(diff, tmp);
+                                        cmovg!(diff, tmp);
+
+                                        kmov!(k(mask2_), [mask_ptr + 1 * diff]);
                                         if i + 1 == m {
                                             kand!(k(mask2_), k(mask2_), k(mask_));
                                         }
 
                                         mask2_
-                                    } else if triangle == 1 && i + 1 == m {
-                                        kmov!(
-                                            k(mask2_),
-                                            [mask_ptr
-                                                + 1 * diff
-                                                + self.mask_sizeof()
-                                                    * (j + 1 - (m - 1) * self.len())]
-                                        );
+                                    } else if triangle == 1 && i + 1 > m - idk {
+                                        alloca!(diff);
+                                        reg!(tmp);
+                                        xor!(tmp, tmp);
+                                        add!(diff, self.mask_sizeof() * (j + 1 - i * self.len()),);
+                                        mov!(tmp, self.mask_sizeof() * self.len());
+                                        cmp!(diff, tmp);
+                                        cmovg!(diff, tmp);
+
+                                        kmov!(k(mask2_), [mask_ptr + 1 * diff]);
                                         if i + 1 == m {
                                             kand!(k(mask2_), k(mask2_), k(mask_));
                                         }
