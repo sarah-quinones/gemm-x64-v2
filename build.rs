@@ -315,8 +315,8 @@ macro_rules! vmovsr {
 macro_rules! alloca {
     ([$reg: expr]) => {
         let __reg__ = Addr::from($reg);
-        asm!("push {__reg__}");
-        defer!(asm!("pop {__reg__}"));
+        asm!("push qword ptr {__reg__}");
+        defer!(asm!("pop qword ptr {__reg__}"));
     };
     ($reg: expr) => {
         let __reg__ = $reg;
