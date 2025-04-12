@@ -1,6 +1,6 @@
 [package]
 name = "private-gemm-x86"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 authors = ["sarah quiñones <sarah@veganb.tw>"]
 description = "x86 matmul impl"
