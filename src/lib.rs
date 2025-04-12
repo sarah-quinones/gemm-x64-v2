@@ -1298,6 +1298,69 @@ pub unsafe fn gemm(
 
     n_threads: usize,
 ) {
+    let (sizeof, cplx) = match dtype {
+        DType::F32 => (4, false),
+        DType::F64 => (8, false),
+        DType::C32 => (8, true),
+        DType::C64 => (16, true),
+    };
+    let mut lhs_rs = lhs_rs * sizeof as isize;
+    let mut lhs_cs = lhs_cs * sizeof as isize;
+    let mut rhs_rs = rhs_rs * sizeof as isize;
+    let mut rhs_cs = rhs_cs * sizeof as isize;
+    let mut dst_rs = dst_rs * sizeof as isize;
+    let mut dst_cs = dst_cs * sizeof as isize;
+    let real_diag_stride = diag_stride * sizeof as isize;
+
+    if nrows == 0 || ncols == 0 || (depth == 0 && beta == Accum::Add) {
+        return;
+    }
+
+    let mut nrows = nrows;
+    let mut ncols = ncols;
+
+    let mut dst = dst;
+    let mut dst_row_idx = dst_row_idx;
+    let mut dst_col_idx = dst_col_idx;
+    let mut dst_kind = dst_kind;
+
+    let mut lhs = lhs;
+    let mut conj_lhs = conj_lhs;
+
+    let mut rhs = rhs;
+    let mut conj_rhs = conj_rhs;
+
+    if dst_rs.unsigned_abs() > dst_cs.unsigned_abs() {
+        use core::mem::swap;
+        swap(&mut dst_rs, &mut dst_cs);
+        swap(&mut dst_row_idx, &mut dst_col_idx);
+        dst_kind = match dst_kind {
+            DstKind::Lower => DstKind::Upper,
+            DstKind::Upper => DstKind::Lower,
+            DstKind::Full => DstKind::Full,
+        };
+        swap(&mut lhs, &mut rhs);
+        swap(&mut lhs_rs, &mut rhs_cs);
+        swap(&mut lhs_cs, &mut rhs_rs);
+        swap(&mut conj_lhs, &mut conj_rhs);
+        swap(&mut nrows, &mut ncols);
+    }
+
+    if dst_rs < 0 && dst_kind == DstKind::Full && dst_row_idx.is_null() {
+        dst = dst.wrapping_byte_offset((nrows - 1) as isize * dst_rs);
+        lhs = lhs.wrapping_byte_offset((nrows - 1) as isize * lhs_rs);
+        dst_rs = -dst_rs;
+        lhs_rs = -lhs_rs;
+    }
+
+    if lhs_cs < 0 && depth > 0 {
+        lhs = lhs.wrapping_byte_offset((depth - 1) as isize * lhs_cs);
+        rhs = rhs.wrapping_byte_offset((depth - 1) as isize * rhs_rs);
+
+        lhs_cs = -lhs_cs;
+        rhs_rs = -rhs_rs;
+    }
+
     let (microkernel, pack, mr, nr) = match (instr, dtype) {
         (InstrSet::Avx256, DType::F32) => {
             (F32_SIMD256.as_slice(), F32_SIMDpack_256.as_slice(), 24, 4)
@@ -1328,24 +1391,11 @@ pub unsafe fn gemm(
             (C64_SIMD512x4.as_slice(), C64_SIMDpack_512.as_slice(), 24, 4)
         }
     };
-    let (sizeof, cplx) = match dtype {
-        DType::F32 => (4, false),
-        DType::F64 => (8, false),
-        DType::C32 => (8, true),
-        DType::C64 => (16, true),
-    };
 
     let m = nrows;
     let n = ncols;
 
     let kc = Ord::min(depth, 512);
-    let lhs_rs = lhs_rs * sizeof as isize;
-    let lhs_cs = lhs_cs * sizeof as isize;
-    let rhs_rs = rhs_rs * sizeof as isize;
-    let rhs_cs = rhs_cs * sizeof as isize;
-    let dst_rs = dst_rs * sizeof as isize;
-    let dst_cs = dst_cs * sizeof as isize;
-    let real_diag_stride = diag_stride * sizeof as isize;
 
     let cache = *cache::CACHE_INFO;
 
