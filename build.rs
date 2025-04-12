@@ -1397,13 +1397,14 @@ impl Target {
     }
 
     fn transpose(self, n_regs: usize) -> (String, usize, bool) {
+        let mut t = self.simd.num_regs() as usize - 1;
+
         if n_regs == 1 {
-            return (String::new(), 0, false);
+            return (String::new(), t, false);
         }
 
         let ctx = Ctx::new();
         setup!(ctx, self);
-        let mut t = self.simd.num_regs() as usize - 1;
 
         let unpacklo32 = "vunpcklps";
         let unpackhi32 = "vunpckhps";
@@ -1873,7 +1874,6 @@ impl Target {
                         label!(loop_begin = _);
                         {
                             alloca!(src);
-                            alloca!(nrows);
 
                             for i in 0..min_nrows / len {
                                 for j in 0..len {
@@ -1889,6 +1889,7 @@ impl Target {
                                     alloca!(diag_ptr);
                                     for j in 0..len {
                                         let reg = if in_t { t as isize - j } else { j };
+                                        assert_ne!(d, reg);
                                         label!({
                                             let cont;
                                         });
@@ -1919,7 +1920,7 @@ impl Target {
 
                                 for j in 0..len {
                                     cmp!(nrows, i * len + j);
-                                    jz!(end);
+                                    jng!(end);
 
                                     asm!("{target.vload(j, Addr::from(src))}");
                                     add!(src, src_rs);
@@ -1934,6 +1935,8 @@ impl Target {
                                     alloca!(diag_ptr);
                                     for j in 0..len {
                                         let reg = if in_t { t as isize - j } else { j };
+                                        assert_ne!(d, reg);
+
                                         label!({
                                             let cont;
                                         });
@@ -2492,10 +2495,7 @@ impl Target {
                                 label!({
                                     let nanokernel;
                                     let loop_end;
-                                    let __tmp;
                                 });
-
-                                label!(__tmp = _);
 
                                 mov!(depth_down, depth);
                                 and!(depth_down, -unroll0 as i8);
