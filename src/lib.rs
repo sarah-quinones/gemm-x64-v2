@@ -1608,20 +1608,22 @@ pub unsafe fn gemm(
                     let all_lhs_rs = row_chunk.map(|m| m as isize * lhs_rs);
                     let all_rhs_cs = col_chunk.map(|n| n as isize * rhs_cs);
 
-                    let packed_lhs_rs = row_chunk.map(|x| {
+                    let mut packed_lhs_rs = row_chunk.map(|x| {
                         if x > l3 / 2 {
                             0
                         } else {
                             (x * kc * sizeof) as isize
                         }
                     });
-                    let packed_rhs_cs = col_chunk.map(|x| {
+                    let mut packed_rhs_cs = col_chunk.map(|x| {
                         if x > l3 / 2 {
                             0
                         } else {
                             (x * kc * sizeof) as isize
                         }
                     });
+                    packed_lhs_rs[0] = 0;
+                    packed_rhs_cs[0] = 0;
 
                     unsafe {
                         kernel(
