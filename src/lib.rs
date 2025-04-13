@@ -10,6 +10,8 @@ use core::{
     sync::atomic::{AtomicU8, AtomicUsize, Ordering},
 };
 
+use cache::CACHE_INFO;
+
 include!(concat!(env!("OUT_DIR"), "/asm.rs"));
 
 #[derive(Copy, Clone, Debug)]
@@ -837,7 +839,7 @@ unsafe impl Millikernel for MilliPar {
         self.finished = AtomicUsize::new(0);
 
         let f = Ord::min(8, milli.0.micro.depth.div_ceil(64));
-        let l3 = 32768 / f;
+        let l3 = CACHE_INFO[2].cache_bytes / f;
 
         let tall = nrows >= l3;
         let wide = ncols >= 2 * nrows;
@@ -1400,7 +1402,7 @@ pub unsafe fn gemm(
     thread_local! {
         static MEM: RefCell<Vec::<core::mem::MaybeUninit<Page>>> = {
             let cache = *cache::CACHE_INFO;
-            let l3 = cache[2].cache_bytes ;
+            let l3 = cache[2].cache_bytes;
 
             let lhs_size = l3.div_ceil(size_of::<Page>());
             let rhs_size = l3.div_ceil(size_of::<Page>());
@@ -1431,8 +1433,8 @@ pub unsafe fn gemm(
             unsafe { mem.set_len(lhs_size + rhs_size) };
         }
 
-        let (packed_lhs, mem) = mem.split_at_mut(lhs_size);
-        let (packed_rhs, _) = mem.split_at_mut(rhs_size);
+        let (packed_lhs, packed_rhs) = mem.split_at_mut(lhs_size);
+        let (packed_rhs, _) = packed_rhs.split_at_mut(rhs_size);
 
         let lhs = ForceSync(lhs);
         let rhs = ForceSync(rhs);
@@ -1582,12 +1584,24 @@ pub unsafe fn gemm(
                                 row_chunk[i - 1].next_multiple_of(row_chunk[i]),
                                 row_chunk[i],
                             );
+                            if row_chunk[i - 1] > l3 / 2 && row_chunk[i - 1] < l3 {
+                                row_chunk[i - 1] = l3 / 2;
+                            }
+                            if row_chunk[i - 1] >= l3 {
+                                row_chunk[i - 1] = Ord::min(row_chunk[i - 1], 2 * row_chunk[i]);
+                            }
                         }
                         for i in (1..q - 1).rev() {
                             col_chunk[i - 1] = Ord::max(
                                 col_chunk[i - 1].next_multiple_of(col_chunk[i]),
                                 col_chunk[i],
                             );
+                            if col_chunk[i - 1] > l3 / 2 && col_chunk[i - 1] < l3 {
+                                col_chunk[i - 1] = l3 / 2;
+                            }
+                            if col_chunk[i - 1] >= l3 {
+                                col_chunk[i - 1] = Ord::min(col_chunk[i - 1], 2 * col_chunk[i]);
+                            }
                         }
                     }
 

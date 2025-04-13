@@ -395,7 +395,23 @@ impl core::ops::Deref for CacheInfoDeref {
     #[inline]
     fn deref(&self) -> &Self::Target {
         static CACHE_INFO: std::sync::OnceLock<[CacheInfo; 3]> = std::sync::OnceLock::new();
-        CACHE_INFO.get_or_init(|| cache_info().unwrap_or(CACHE_INFO_DEFAULT))
+        CACHE_INFO.get_or_init(|| {
+            let mut val = cache_info().unwrap_or(CACHE_INFO_DEFAULT);
+            val[0].cache_bytes = Ord::max(val[0].cache_bytes, CACHE_INFO_DEFAULT[0].cache_bytes);
+
+            val[1].cache_bytes = Ord::max(val[1].cache_bytes, CACHE_INFO_DEFAULT[1].cache_bytes);
+            val[1].cache_bytes = Ord::max(
+                val[1].cache_bytes,
+                val[0].cache_bytes.checked_mul(4).unwrap(),
+            );
+
+            val[2].cache_bytes = Ord::max(val[2].cache_bytes, CACHE_INFO_DEFAULT[2].cache_bytes);
+            val[2].cache_bytes = Ord::max(
+                val[2].cache_bytes,
+                val[1].cache_bytes.checked_mul(4).unwrap(),
+            );
+            val
+        })
     }
 }
 
