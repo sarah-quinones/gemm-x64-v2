@@ -3207,9 +3207,9 @@ impl Target {
 
                             lea!(
                                 mask_ptr,
-                                [rip + &func_name(&format!("{prefix}.mask.data"), "", false)
-                                    + self.len() * self.mask_sizeof()]
+                                [rip + &func_name(&format!("{prefix}.mask.data"), "", false)]
                             );
+                            add!(mask_ptr, self.len() * self.mask_sizeof());
                             kmov!(k(mask_), [mask_ptr]);
                             jmp!(cont);
 
