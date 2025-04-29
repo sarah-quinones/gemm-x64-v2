@@ -3486,20 +3486,16 @@ fn main() -> Result {
     writeln!(
         code,
         "
-            .globl {func_name(\"gemm.microkernel.c64.flip.re.data\", \"\", true)}
             .align 64
             {func_name(\"gemm.microkernel.c64.flip.re.data\", \"\", true)}:
             .quad 0x8000000000000000,0,0x8000000000000000,0,0x8000000000000000,0,0x8000000000000000,0
-            .globl {func_name(\"gemm.microkernel.c64.flip.im.data\", \"\", true)}
             .align 64
             {func_name(\"gemm.microkernel.c64.flip.im.data\", \"\", true)}:
             .quad 0,0x8000000000000000,0,0x8000000000000000,0,0x8000000000000000,0,0x8000000000000000
 
-            .globl {func_name(\"gemm.microkernel.c32.flip.re.data\", \"\", true)}
             .align 64
             {func_name(\"gemm.microkernel.c32.flip.re.data\", \"\", true)}:
             .int 0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0
-            .globl {func_name(\"gemm.microkernel.c32.flip.im.data\", \"\", true)}
             .align 64
             {func_name(\"gemm.microkernel.c32.flip.im.data\", \"\", true)}:
             .int 0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000
@@ -3509,37 +3505,29 @@ fn main() -> Result {
 
             
 
-            .globl {func_name(\"gemm.microkernel.c64.simd128.rmask.data\", \"\", true)}
-            .globl {func_name(\"gemm.microkernel.c64.simd128.mask.data\", \"\", true)}
             .align 16
             {func_name(\"gemm.microkernel.c64.simd128.rmask.data\", \"\", true)}:
             {func_name(\"gemm.microkernel.c64.simd128.mask.data\", \"\", true)}:
             .octa 0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
 
-            .globl {func_name(\"gemm.microkernel.c64.simd256.rmask.data\", \"\", true)}
             .align 32
             {func_name(\"gemm.microkernel.c64.simd256.rmask.data\", \"\", true)}:
             .octa 0,0, 0,0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
 
-            .globl {func_name(\"gemm.microkernel.c64.simd256.mask.data\", \"\", true)}
             .align 32
             {func_name(\"gemm.microkernel.c64.simd256.mask.data\", \"\", true)}:
             .octa 0,0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
 
 
-            .globl {func_name(\"gemm.microkernel.c64.simd512.rmask.data\", \"\", true)}
             {func_name(\"gemm.microkernel.c64.simd512.rmask.data\", \"\", true)}:
             .byte 0b00000000, 0b11000000, 0b11110000, 0b11111100, 0b11111111
 
-            .globl {func_name(\"gemm.microkernel.c64.simd512.mask.data\", \"\", true)}
             {func_name(\"gemm.microkernel.c64.simd512.mask.data\", \"\", true)}:
             .byte 0b00000000, 0b00000011, 0b00001111, 0b00111111, 0b11111111
 
-            .globl {func_name(\"gemm.microkernel.f64.simd512.rmask.data\", \"\", true)}
             {func_name(\"gemm.microkernel.f64.simd512.rmask.data\", \"\", true)}:
             .byte 0b00000000, 0b10000000, 0b11000000, 0b11100000, 0b11110000, 0b11111000, 0b11111100, 0b11111110, 0b11111111
 
-            .globl {func_name(\"gemm.microkernel.f64.simd512.mask.data\", \"\", true)}
             {func_name(\"gemm.microkernel.f64.simd512.mask.data\", \"\", true)}:
             .byte 0b00000000, 0b00000001, 0b00000011, 0b00000111, 0b00001111, 0b00011111, 0b00111111, 0b01111111, 0b11111111
 
@@ -3547,41 +3535,31 @@ fn main() -> Result {
 
 
 
-            .globl {func_name(\"gemm.microkernel.c32.simd128.rmask.data\", \"\", true)}
-            .globl {func_name(\"gemm.microkernel.f64.simd128.rmask.data\", \"\", true)}
             .align 16
             {func_name(\"gemm.microkernel.c32.simd128.rmask.data\", \"\", true)}:
             {func_name(\"gemm.microkernel.f64.simd128.rmask.data\", \"\", true)}:
             .quad 0,0, 0,-1, -1,-1
 
-            .globl {func_name(\"gemm.microkernel.c32.simd128.mask.data\", \"\", true)}
-            .globl {func_name(\"gemm.microkernel.f64.simd128.mask.data\", \"\", true)}
             .align 16
             {func_name(\"gemm.microkernel.c32.simd128.mask.data\", \"\", true)}:
             {func_name(\"gemm.microkernel.f64.simd128.mask.data\", \"\", true)}:
             .quad 0,0, -1,0, -1,-1
             
-            .globl {func_name(\"gemm.microkernel.c32.simd256.rmask.data\", \"\", true)}
-            .globl {func_name(\"gemm.microkernel.f64.simd256.rmask.data\", \"\", true)}
             .align 32
             {func_name(\"gemm.microkernel.c32.simd256.rmask.data\", \"\", true)}:
             {func_name(\"gemm.microkernel.f64.simd256.rmask.data\", \"\", true)}:
             .quad 0,0,0,0, 0,0,0,-1, 0,0,-1,-1, 0,-1,-1,-1, -1,-1,-1,-1
 
-            .globl {func_name(\"gemm.microkernel.c32.simd256.mask.data\", \"\", true)}
-            .globl {func_name(\"gemm.microkernel.f64.simd256.mask.data\", \"\", true)}
             .align 32
             {func_name(\"gemm.microkernel.c32.simd256.mask.data\", \"\", true)}:
             {func_name(\"gemm.microkernel.f64.simd256.mask.data\", \"\", true)}:
             .quad 0,0,0,0, -1,0,0,0, -1,-1,0,0, -1,-1,-1,0, -1,-1,-1,-1
 
 
-            .globl {func_name(\"gemm.microkernel.c32.simd512.rmask.data\", \"\", true)}
             .align 2
             {func_name(\"gemm.microkernel.c32.simd512.rmask.data\", \"\", true)}:
             .word 0b0000000000000000, 0b1100000000000000, 0b1111000000000000, 0b1111110000000000, 0b1111111100000000, 0b1111111111000000, 0b1111111111110000, 0b1111111111111100, 0b1111111111111111
 
-            .globl {func_name(\"gemm.microkernel.c32.simd512.mask.data\", \"\", true)}
             .align 2
             {func_name(\"gemm.microkernel.c32.simd512.mask.data\", \"\", true)}:
             .word 0b0000000000000000, 0b0000000000000011, 0b0000000000001111, 0b0000000000111111, 0b0000000011111111, 0b0000001111111111, 0b0000111111111111, 0b0011111111111111, 0b1111111111111111
@@ -3590,33 +3568,27 @@ fn main() -> Result {
 
 
             
-            .globl {func_name(\"gemm.microkernel.f32.simd128.rmask.data\", \"\", true)}
             .align 16
             {func_name(\"gemm.microkernel.f32.simd128.rmask.data\", \"\", true)}:
             .int 0,0,0,0, 0,0,0,-1, 0,0,-1,-1, 0,-1,-1,-1, -1,-1,-1,-1
 
-            .globl {func_name(\"gemm.microkernel.f32.simd128.mask.data\", \"\", true)}
             .align 16
             {func_name(\"gemm.microkernel.f32.simd128.mask.data\", \"\", true)}:
             .int 0,0,0,0, -1,0,0,0, -1,-1,0,0, -1,-1,-1,0, -1,-1,-1,-1
             
-            .globl {func_name(\"gemm.microkernel.f32.simd256.rmask.data\", \"\", true)}
             .align 32
             {func_name(\"gemm.microkernel.f32.simd256.rmask.data\", \"\", true)}:
             .int 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,-1, 0,0,0,0,0,0,-1,-1, 0,0,0,0,0,-1,-1,-1, 0,0,0,0,-1,-1,-1,-1, 0,0,0,-1,-1,-1,-1,-1, 0,0,-1,-1,-1,-1,-1,-1, 0,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1
 
-            .globl {func_name(\"gemm.microkernel.f32.simd256.mask.data\", \"\", true)}
             .align 32
             {func_name(\"gemm.microkernel.f32.simd256.mask.data\", \"\", true)}:
             .int 0,0,0,0,0,0,0,0, -1,0,0,0,0,0,0,0, -1,-1,0,0,0,0,0,0, -1,-1,-1,0,0,0,0,0, -1,-1,-1,-1,0,0,0,0, -1,-1,-1,-1,-1,0,0,0, -1,-1,-1,-1,-1,-1,0,0, -1,-1,-1,-1,-1,-1,-1,0, -1,-1,-1,-1,-1,-1,-1,-1
 
 
-            .globl {func_name(\"gemm.microkernel.f32.simd512.rmask.data\", \"\", true)}
             .align 2
             {func_name(\"gemm.microkernel.f32.simd512.rmask.data\", \"\", true)}:
             .word 0b0000000000000000, 0b1000000000000000, 0b1100000000000000, 0b1110000000000000, 0b1111000000000000, 0b1111100000000000, 0b1111110000000000, 0b1111111000000000, 0b1111111100000000, 0b1111111110000000, 0b1111111111000000, 0b1111111111100000, 0b1111111111110000, 0b1111111111111000, 0b1111111111111100, 0b1111111111111110, 0b1111111111111111
 
-            .globl {func_name(\"gemm.microkernel.f32.simd512.mask.data\", \"\", true)}
             .align 2
             {func_name(\"gemm.microkernel.f32.simd512.mask.data\", \"\", true)}:
             .word 0b0000000000000000, 0b0000000000000001, 0b0000000000000011, 0b0000000000000111, 0b0000000000001111, 0b0000000000011111, 0b0000000000111111, 0b0000000001111111, 0b0000000011111111, 0b0000000111111111, 0b0000001111111111, 0b0000011111111111, 0b0000111111111111, 0b0001111111111111, 0b0011111111111111, 0b0111111111111111, 0b1111111111111111
