@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "private-gemm-x86"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "aligned-vec",
  "blas-sys",
