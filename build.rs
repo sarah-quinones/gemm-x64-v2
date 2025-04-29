@@ -24,13 +24,14 @@ const INFO_DIAG_STRIDE: isize = 13 * WORD;
 
 use std::env;
 use std::fmt::Display;
+use std::fmt::Write;
 use std::fs;
 use std::ops::*;
 use std::path::Path;
 use std::sync::LazyLock;
 
 use defer::defer;
-use interpol::{format, println};
+use interpol::{format, println, writeln};
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::ops::Index;
@@ -1783,7 +1784,7 @@ impl Target {
                                 true,
                             );
 
-                            lea!(tmp, [rip + &name + 4 * self.mask_sizeof()]);
+                            lea!(tmp, [rip + &name]);
                         }
                         if self.mask_sizeof() <= 8 {
                             lea!(
@@ -2135,8 +2136,7 @@ impl Target {
                         reg!(tmp);
                         lea!(
                             tmp,
-                            [rip + &func_name(&format!("{prefix}.mask.data"), "", false)
-                                + 4 * self.mask_sizeof()]
+                            [rip + &func_name(&format!("{prefix}.mask.data"), "", false)]
                         );
 
                         if self.mask_sizeof() <= 8 {
@@ -3208,7 +3208,7 @@ impl Target {
                             lea!(
                                 mask_ptr,
                                 [rip + &func_name(&format!("{prefix}.mask.data"), "", false)
-                                    + (4 + self.len()) * self.mask_sizeof()]
+                                    + self.len() * self.mask_sizeof()]
                             );
                             kmov!(k(mask_), [mask_ptr]);
                             jmp!(cont);
@@ -3217,8 +3217,7 @@ impl Target {
 
                             lea!(
                                 mask_ptr,
-                                [rip + &func_name(&format!("{prefix}.mask.data"), "", false)
-                                    + 4 * self.mask_sizeof()]
+                                [rip + &func_name(&format!("{prefix}.mask.data"), "", false)]
                             );
 
                             if self.mask_sizeof() <= 8 {
@@ -3245,15 +3244,13 @@ impl Target {
                             if triangle == 0 {
                                 lea!(
                                     mask_ptr,
-                                    [rip + &func_name(&format!("{prefix}.rmask.data"), "", false)
-                                        + 4 * self.mask_sizeof()]
+                                    [rip + &func_name(&format!("{prefix}.rmask.data"), "", false)]
                                 );
                             }
                             if triangle == 1 {
                                 lea!(
                                     mask_ptr,
-                                    [rip + &func_name(&format!("{prefix}.mask.data"), "", false)
-                                        + 4 * self.mask_sizeof()]
+                                    [rip + &func_name(&format!("{prefix}.mask.data"), "", false)]
                                 );
                             }
                         }
@@ -3486,6 +3483,146 @@ fn main() -> Result {
 
     let out_dir = env::var_os("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("asm.s");
+    writeln!(
+        code,
+        "
+            .globl {func_name(\"gemm.microkernel.c64.flip.re.data\", \"\", true)}
+            .align 64
+            {func_name(\"gemm.microkernel.c64.flip.re.data\", \"\", true)}:
+            .quad 0x8000000000000000,0,0x8000000000000000,0,0x8000000000000000,0,0x8000000000000000,0
+            .globl {func_name(\"gemm.microkernel.c64.flip.im.data\", \"\", true)}
+            .align 64
+            {func_name(\"gemm.microkernel.c64.flip.im.data\", \"\", true)}:
+            .quad 0,0x8000000000000000,0,0x8000000000000000,0,0x8000000000000000,0,0x8000000000000000
+
+            .globl {func_name(\"gemm.microkernel.c32.flip.re.data\", \"\", true)}
+            .align 64
+            {func_name(\"gemm.microkernel.c32.flip.re.data\", \"\", true)}:
+            .int 0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0
+            .globl {func_name(\"gemm.microkernel.c32.flip.im.data\", \"\", true)}
+            .align 64
+            {func_name(\"gemm.microkernel.c32.flip.im.data\", \"\", true)}:
+            .int 0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000,0,0x80000000
+
+
+
+
+            
+
+            .globl {func_name(\"gemm.microkernel.c64.simd128.rmask.data\", \"\", true)}
+            .globl {func_name(\"gemm.microkernel.c64.simd128.mask.data\", \"\", true)}
+            .align 16
+            {func_name(\"gemm.microkernel.c64.simd128.rmask.data\", \"\", true)}:
+            {func_name(\"gemm.microkernel.c64.simd128.mask.data\", \"\", true)}:
+            .octa 0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+
+            .globl {func_name(\"gemm.microkernel.c64.simd256.rmask.data\", \"\", true)}
+            .align 32
+            {func_name(\"gemm.microkernel.c64.simd256.rmask.data\", \"\", true)}:
+            .octa 0,0, 0,0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+
+            .globl {func_name(\"gemm.microkernel.c64.simd256.mask.data\", \"\", true)}
+            .align 32
+            {func_name(\"gemm.microkernel.c64.simd256.mask.data\", \"\", true)}:
+            .octa 0,0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+
+
+            .globl {func_name(\"gemm.microkernel.c64.simd512.rmask.data\", \"\", true)}
+            {func_name(\"gemm.microkernel.c64.simd512.rmask.data\", \"\", true)}:
+            .byte 0b00000000, 0b11000000, 0b11110000, 0b11111100, 0b11111111
+
+            .globl {func_name(\"gemm.microkernel.c64.simd512.mask.data\", \"\", true)}
+            {func_name(\"gemm.microkernel.c64.simd512.mask.data\", \"\", true)}:
+            .byte 0b00000000, 0b00000011, 0b00001111, 0b00111111, 0b11111111
+
+            .globl {func_name(\"gemm.microkernel.f64.simd512.rmask.data\", \"\", true)}
+            {func_name(\"gemm.microkernel.f64.simd512.rmask.data\", \"\", true)}:
+            .byte 0b00000000, 0b10000000, 0b11000000, 0b11100000, 0b11110000, 0b11111000, 0b11111100, 0b11111110, 0b11111111
+
+            .globl {func_name(\"gemm.microkernel.f64.simd512.mask.data\", \"\", true)}
+            {func_name(\"gemm.microkernel.f64.simd512.mask.data\", \"\", true)}:
+            .byte 0b00000000, 0b00000001, 0b00000011, 0b00000111, 0b00001111, 0b00011111, 0b00111111, 0b01111111, 0b11111111
+
+
+
+
+
+            .globl {func_name(\"gemm.microkernel.c32.simd128.rmask.data\", \"\", true)}
+            .globl {func_name(\"gemm.microkernel.f64.simd128.rmask.data\", \"\", true)}
+            .align 16
+            {func_name(\"gemm.microkernel.c32.simd128.rmask.data\", \"\", true)}:
+            {func_name(\"gemm.microkernel.f64.simd128.rmask.data\", \"\", true)}:
+            .quad 0,0, 0,-1, -1,-1
+
+            .globl {func_name(\"gemm.microkernel.c32.simd128.mask.data\", \"\", true)}
+            .globl {func_name(\"gemm.microkernel.f64.simd128.mask.data\", \"\", true)}
+            .align 16
+            {func_name(\"gemm.microkernel.c32.simd128.mask.data\", \"\", true)}:
+            {func_name(\"gemm.microkernel.f64.simd128.mask.data\", \"\", true)}:
+            .quad 0,0, -1,0, -1,-1
+            
+            .globl {func_name(\"gemm.microkernel.c32.simd256.rmask.data\", \"\", true)}
+            .globl {func_name(\"gemm.microkernel.f64.simd256.rmask.data\", \"\", true)}
+            .align 32
+            {func_name(\"gemm.microkernel.c32.simd256.rmask.data\", \"\", true)}:
+            {func_name(\"gemm.microkernel.f64.simd256.rmask.data\", \"\", true)}:
+            .quad 0,0,0,0, 0,0,0,-1, 0,0,-1,-1, 0,-1,-1,-1, -1,-1,-1,-1
+
+            .globl {func_name(\"gemm.microkernel.c32.simd256.mask.data\", \"\", true)}
+            .globl {func_name(\"gemm.microkernel.f64.simd256.mask.data\", \"\", true)}
+            .align 32
+            {func_name(\"gemm.microkernel.c32.simd256.mask.data\", \"\", true)}:
+            {func_name(\"gemm.microkernel.f64.simd256.mask.data\", \"\", true)}:
+            .quad 0,0,0,0, -1,0,0,0, -1,-1,0,0, -1,-1,-1,0, -1,-1,-1,-1
+
+
+            .globl {func_name(\"gemm.microkernel.c32.simd512.rmask.data\", \"\", true)}
+            .align 2
+            {func_name(\"gemm.microkernel.c32.simd512.rmask.data\", \"\", true)}:
+            .word 0b0000000000000000, 0b1100000000000000, 0b1111000000000000, 0b1111110000000000, 0b1111111100000000, 0b1111111111000000, 0b1111111111110000, 0b1111111111111100, 0b1111111111111111
+
+            .globl {func_name(\"gemm.microkernel.c32.simd512.mask.data\", \"\", true)}
+            .align 2
+            {func_name(\"gemm.microkernel.c32.simd512.mask.data\", \"\", true)}:
+            .word 0b0000000000000000, 0b0000000000000011, 0b0000000000001111, 0b0000000000111111, 0b0000000011111111, 0b0000001111111111, 0b0000111111111111, 0b0011111111111111, 0b1111111111111111
+
+
+
+
+            
+            .globl {func_name(\"gemm.microkernel.f32.simd128.rmask.data\", \"\", true)}
+            .align 16
+            {func_name(\"gemm.microkernel.f32.simd128.rmask.data\", \"\", true)}:
+            .int 0,0,0,0, 0,0,0,-1, 0,0,-1,-1, 0,-1,-1,-1, -1,-1,-1,-1
+
+            .globl {func_name(\"gemm.microkernel.f32.simd128.mask.data\", \"\", true)}
+            .align 16
+            {func_name(\"gemm.microkernel.f32.simd128.mask.data\", \"\", true)}:
+            .int 0,0,0,0, -1,0,0,0, -1,-1,0,0, -1,-1,-1,0, -1,-1,-1,-1
+            
+            .globl {func_name(\"gemm.microkernel.f32.simd256.rmask.data\", \"\", true)}
+            .align 32
+            {func_name(\"gemm.microkernel.f32.simd256.rmask.data\", \"\", true)}:
+            .int 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,-1, 0,0,0,0,0,0,-1,-1, 0,0,0,0,0,-1,-1,-1, 0,0,0,0,-1,-1,-1,-1, 0,0,0,-1,-1,-1,-1,-1, 0,0,-1,-1,-1,-1,-1,-1, 0,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1
+
+            .globl {func_name(\"gemm.microkernel.f32.simd256.mask.data\", \"\", true)}
+            .align 32
+            {func_name(\"gemm.microkernel.f32.simd256.mask.data\", \"\", true)}:
+            .int 0,0,0,0,0,0,0,0, -1,0,0,0,0,0,0,0, -1,-1,0,0,0,0,0,0, -1,-1,-1,0,0,0,0,0, -1,-1,-1,-1,0,0,0,0, -1,-1,-1,-1,-1,0,0,0, -1,-1,-1,-1,-1,-1,0,0, -1,-1,-1,-1,-1,-1,-1,0, -1,-1,-1,-1,-1,-1,-1,-1
+
+
+            .globl {func_name(\"gemm.microkernel.f32.simd512.rmask.data\", \"\", true)}
+            .align 2
+            {func_name(\"gemm.microkernel.f32.simd512.rmask.data\", \"\", true)}:
+            .word 0b0000000000000000, 0b1000000000000000, 0b1100000000000000, 0b1110000000000000, 0b1111000000000000, 0b1111100000000000, 0b1111110000000000, 0b1111111000000000, 0b1111111100000000, 0b1111111110000000, 0b1111111111000000, 0b1111111111100000, 0b1111111111110000, 0b1111111111111000, 0b1111111111111100, 0b1111111111111110, 0b1111111111111111
+
+            .globl {func_name(\"gemm.microkernel.f32.simd512.mask.data\", \"\", true)}
+            .align 2
+            {func_name(\"gemm.microkernel.f32.simd512.mask.data\", \"\", true)}:
+            .word 0b0000000000000000, 0b0000000000000001, 0b0000000000000011, 0b0000000000000111, 0b0000000000001111, 0b0000000000011111, 0b0000000000111111, 0b0000000001111111, 0b0000000011111111, 0b0000000111111111, 0b0000001111111111, 0b0000011111111111, 0b0000111111111111, 0b0001111111111111, 0b0011111111111111, 0b0111111111111111, 0b1111111111111111
+        "
+    )?;
+
     fs::write(&dest_path, &code)?;
 
     {
@@ -3556,478 +3693,6 @@ fn main() -> Result {
             }
             code += "];";
         }
-
-        code += &format!(
-            "
-                const fn reverse<T: Copy, const N: usize>(x: [T; N]) -> [T; N] {{
-                    let mut y = x;
-                    let mut i = 0;
-                    while i < N {{
-                        y[i] = x[N - i - 1];
-                        i += 1;
-                    }}
-                    y
-                }}
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd128.mask.data\", \"\", true)})]
-                 static __MASK_F32_128__: [::core::arch::x86_64::__m128i; 5 + 8] = unsafe {{::core::mem::transmute([
-                    [ 0,  0,  0, 0i32],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [-1,  0,  0,    0],
-                    [-1, -1,  0,    0],
-                    [-1, -1, -1,    0],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd256.mask.data\", \"\", true)})]
-                 static __MASK_F32_256__: [::core::arch::x86_64::__m256i; 9 + 8] = unsafe {{::core::mem::transmute([
-                    [ 0,  0,  0,  0,  0,  0,  0, 0i32],
-                    [ 0,  0,  0,  0,  0,  0,  0,    0],
-                    [ 0,  0,  0,  0,  0,  0,  0,    0],
-                    [ 0,  0,  0,  0,  0,  0,  0,    0],
-                    [ 0,  0,  0,  0,  0,  0,  0,    0],
-                    [-1,  0,  0,  0,  0,  0,  0,    0],
-                    [-1, -1,  0,  0,  0,  0,  0,    0],
-                    [-1, -1, -1,  0,  0,  0,  0,    0],
-                    [-1, -1, -1, -1,  0,  0,  0,    0],
-                    [-1, -1, -1, -1, -1,  0,  0,    0],
-                    [-1, -1, -1, -1, -1, -1,  0,    0],
-                    [-1, -1, -1, -1, -1, -1, -1,    0],
-                    [-1, -1, -1, -1, -1, -1, -1,   -1],
-                    [-1, -1, -1, -1, -1, -1, -1,   -1],
-                    [-1, -1, -1, -1, -1, -1, -1,   -1],
-                    [-1, -1, -1, -1, -1, -1, -1,   -1],
-                    [-1, -1, -1, -1, -1, -1, -1,   -1],
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd512.mask.data\", \"\", true)})]
-                 static __MASK_F32_512__: [u16; 17 + 8] = [
-                    0b0000000000000000,
-                    0b0000000000000000,
-                    0b0000000000000000,
-                    0b0000000000000000,
-                    0b0000000000000000,
-                    0b0000000000000001,
-                    0b0000000000000011,
-                    0b0000000000000111,
-                    0b0000000000001111,
-                    0b0000000000011111,
-                    0b0000000000111111,
-                    0b0000000001111111,
-                    0b0000000011111111,
-                    0b0000000111111111,
-                    0b0000001111111111,
-                    0b0000011111111111,
-                    0b0000111111111111,
-                    0b0001111111111111,
-                    0b0011111111111111,
-                    0b0111111111111111,
-                    0b1111111111111111,
-                    0b1111111111111111,
-                    0b1111111111111111,
-                    0b1111111111111111,
-                    0b1111111111111111,
-                ];
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd128.mask.data\", \"\", true)})]
-                 static __MASK_F64_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
-                    [ 0, 0i64],
-                    [ 0,    0],
-                    [ 0,    0],
-                    [ 0,    0],
-                    [ 0,    0],
-                    [-1,    0],
-                    [-1,   -1],
-                    [-1,   -1],
-                    [-1,   -1],
-                    [-1,   -1],
-                    [-1,   -1],
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd256.mask.data\", \"\", true)})]
-                 static __MASK_F64_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
-                    [ 0,  0,  0, 0i64],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [-1,  0,  0,    0],
-                    [-1, -1,  0,    0],
-                    [-1, -1, -1,    0],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd512.mask.data\", \"\", true)})]
-                 static __MASK_F64_512__: [u8; 9 + 8] = [
-                    0b00000000,
-                    0b00000000,
-                    0b00000000,
-                    0b00000000,
-                    0b00000000,
-                    0b00000001,
-                    0b00000011,
-                    0b00000111,
-                    0b00001111,
-                    0b00011111,
-                    0b00111111,
-                    0b01111111,
-                    0b11111111,
-                    0b11111111,
-                    0b11111111,
-                    0b11111111,
-                    0b11111111,
-                ];
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd128.mask.data\", \"\", true)})]
-                 static __MASK_C64_128__: [::core::arch::x86_64::__m128i; 2 + 8] = unsafe {{::core::mem::transmute([
-                    [ 0, 0i64],
-                    [ 0,    0],
-                    [ 0,    0],
-                    [ 0,    0],
-                    [ 0,    0],
-                    [-1,   -1],
-                    [-1,   -1],
-                    [-1,   -1],
-                    [-1,   -1],
-                    [-1,   -1],
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd256.mask.data\", \"\", true)})]
-                 static __MASK_C64_256__: [::core::arch::x86_64::__m256i; 3 + 8] = unsafe {{::core::mem::transmute([
-                    [ 0,  0,  0, 0i64],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [-1, -1,  0,    0],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd512.mask.data\", \"\", true)})]
-                 static __MASK_C64_512__: [u8; 5 + 8] = [
-                    0b00000000,
-                    0b00000000,
-                    0b00000000,
-                    0b00000000,
-                    0b00000000,
-                    0b00000011,
-                    0b00001111,
-                    0b00111111,
-                    0b11111111,
-                    0b11111111,
-                    0b11111111,
-                    0b11111111,
-                    0b11111111,
-                ];
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd128.mask.data\", \"\", true)})]
-                 static __MASK_C32_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
-                    [ 0,  0,  0, 0i32],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [ 0,  0,  0,    0],
-                    [-1, -1,  0,    0],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                    [-1, -1, -1,   -1],
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd256.mask.data\", \"\", true)})]
-                 static __MASK_C32_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
-                    [ 0,  0,  0,  0,  0,  0,  0, 0i32],
-                    [ 0,  0,  0,  0,  0,  0,  0,    0],
-                    [ 0,  0,  0,  0,  0,  0,  0,    0],
-                    [ 0,  0,  0,  0,  0,  0,  0,    0],
-                    [ 0,  0,  0,  0,  0,  0,  0,    0],
-                    [-1, -1,  0,  0,  0,  0,  0,    0],
-                    [-1, -1, -1, -1,  0,  0,  0,    0],
-                    [-1, -1, -1, -1, -1, -1,  0,    0],
-                    [-1, -1, -1, -1, -1, -1, -1,   -1],
-                    [-1, -1, -1, -1, -1, -1, -1,   -1],
-                    [-1, -1, -1, -1, -1, -1, -1,   -1],
-                    [-1, -1, -1, -1, -1, -1, -1,   -1],
-                    [-1, -1, -1, -1, -1, -1, -1,   -1],
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd512.mask.data\", \"\", true)})]
-                 static __MASK_C32_512__: [u16; 9 + 8] = [
-                    0b0000000000000000,
-                    0b0000000000000000,
-                    0b0000000000000000,
-                    0b0000000000000000,
-                    0b0000000000000000,
-                    0b0000000000000011,
-                    0b0000000000001111,
-                    0b0000000000111111,
-                    0b0000000011111111,
-                    0b0000001111111111,
-                    0b0000111111111111,
-                    0b0011111111111111,
-                    0b1111111111111111,
-                    0b1111111111111111,
-                    0b1111111111111111,
-                    0b1111111111111111,
-                    0b1111111111111111,
-                ];
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd128.rmask.data\", \"\", true)})]
-                 static __rMASK_F32_128__: [::core::arch::x86_64::__m128i; 5 + 8] = unsafe {{::core::mem::transmute([
-                    reverse([ 0,  0,  0, 0i32]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([-1,  0,  0,    0]),
-                    reverse([-1, -1,  0,    0]),
-                    reverse([-1, -1, -1,    0]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd256.rmask.data\", \"\", true)})]
-                 static __rMASK_F32_256__: [::core::arch::x86_64::__m256i; 9 + 8] = unsafe {{::core::mem::transmute([
-                    reverse([ 0,  0,  0,  0,  0,  0,  0, 0i32]),
-                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
-                    reverse([-1,  0,  0,  0,  0,  0,  0,    0]),
-                    reverse([-1, -1,  0,  0,  0,  0,  0,    0]),
-                    reverse([-1, -1, -1,  0,  0,  0,  0,    0]),
-                    reverse([-1, -1, -1, -1,  0,  0,  0,    0]),
-                    reverse([-1, -1, -1, -1, -1,  0,  0,    0]),
-                    reverse([-1, -1, -1, -1, -1, -1,  0,    0]),
-                    reverse([-1, -1, -1, -1, -1, -1, -1,    0]),
-                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
-                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
-                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
-                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
-                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f32.simd512.rmask.data\", \"\", true)})]
-                 static __rMASK_F32_512__: [u16; 17 + 8] = [
-                    0b0000000000000000u16.reverse_bits(),
-                    0b0000000000000000u16.reverse_bits(),
-                    0b0000000000000000u16.reverse_bits(),
-                    0b0000000000000000u16.reverse_bits(),
-                    0b0000000000000000u16.reverse_bits(),
-                    0b0000000000000001u16.reverse_bits(),
-                    0b0000000000000011u16.reverse_bits(),
-                    0b0000000000000111u16.reverse_bits(),
-                    0b0000000000001111u16.reverse_bits(),
-                    0b0000000000011111u16.reverse_bits(),
-                    0b0000000000111111u16.reverse_bits(),
-                    0b0000000001111111u16.reverse_bits(),
-                    0b0000000011111111u16.reverse_bits(),
-                    0b0000000111111111u16.reverse_bits(),
-                    0b0000001111111111u16.reverse_bits(),
-                    0b0000011111111111u16.reverse_bits(),
-                    0b0000111111111111u16.reverse_bits(),
-                    0b0001111111111111u16.reverse_bits(),
-                    0b0011111111111111u16.reverse_bits(),
-                    0b0111111111111111u16.reverse_bits(),
-                    0b1111111111111111u16.reverse_bits(),
-                    0b1111111111111111u16.reverse_bits(),
-                    0b1111111111111111u16.reverse_bits(),
-                    0b1111111111111111u16.reverse_bits(),
-                    0b1111111111111111u16.reverse_bits(),
-                ];
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd128.rmask.data\", \"\", true)})]
-                 static __rMASK_F64_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
-                    reverse([ 0, 0i64]),
-                    reverse([ 0,    0]),
-                    reverse([ 0,    0]),
-                    reverse([ 0,    0]),
-                    reverse([ 0,    0]),
-                    reverse([-1,    0]),
-                    reverse([-1,   -1]),
-                    reverse([-1,   -1]),
-                    reverse([-1,   -1]),
-                    reverse([-1,   -1]),
-                    reverse([-1,   -1]),
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd256.rmask.data\", \"\", true)})]
-                 static __rMASK_F64_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
-                    reverse([ 0,  0,  0, 0i64]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([-1,  0,  0,    0]),
-                    reverse([-1, -1,  0,    0]),
-                    reverse([-1, -1, -1,    0]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.f64.simd512.rmask.data\", \"\", true)})]
-                 static __rMASK_F64_512__: [u8; 9 + 8] = [
-                    0b00000000u8.reverse_bits(),
-                    0b00000000u8.reverse_bits(),
-                    0b00000000u8.reverse_bits(),
-                    0b00000000u8.reverse_bits(),
-                    0b00000000u8.reverse_bits(),
-                    0b00000001u8.reverse_bits(),
-                    0b00000011u8.reverse_bits(),
-                    0b00000111u8.reverse_bits(),
-                    0b00001111u8.reverse_bits(),
-                    0b00011111u8.reverse_bits(),
-                    0b00111111u8.reverse_bits(),
-                    0b01111111u8.reverse_bits(),
-                    0b11111111u8.reverse_bits(),
-                    0b11111111u8.reverse_bits(),
-                    0b11111111u8.reverse_bits(),
-                    0b11111111u8.reverse_bits(),
-                    0b11111111u8.reverse_bits(),
-                ];
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd128.rmask.data\", \"\", true)})]
-                 static __rMASK_C64_128__: [::core::arch::x86_64::__m128i; 2 + 8] = unsafe {{::core::mem::transmute([
-                    reverse([ 0, 0i64]),
-                    reverse([ 0,    0]),
-                    reverse([ 0,    0]),
-                    reverse([ 0,    0]),
-                    reverse([ 0,    0]),
-                    reverse([-1,   -1]),
-                    reverse([-1,   -1]),
-                    reverse([-1,   -1]),
-                    reverse([-1,   -1]),
-                    reverse([-1,   -1]),
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd256.rmask.data\", \"\", true)})]
-                 static __rMASK_C64_256__: [::core::arch::x86_64::__m256i; 3 + 8] = unsafe {{::core::mem::transmute([
-                    reverse([ 0,  0,  0, 0i64]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([-1, -1,  0,    0]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.simd512.rmask.data\", \"\", true)})]
-                 static __rMASK_C64_512__: [u8; 5 + 8] = [
-                    0b00000000u8.reverse_bits(),
-                    0b00000000u8.reverse_bits(),
-                    0b00000000u8.reverse_bits(),
-                    0b00000000u8.reverse_bits(),
-                    0b00000000u8.reverse_bits(),
-                    0b00000011u8.reverse_bits(),
-                    0b00001111u8.reverse_bits(),
-                    0b00111111u8.reverse_bits(),
-                    0b11111111u8.reverse_bits(),
-                    0b11111111u8.reverse_bits(),
-                    0b11111111u8.reverse_bits(),
-                    0b11111111u8.reverse_bits(),
-                    0b11111111u8.reverse_bits(),
-                ];
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd128.rmask.data\", \"\", true)})]
-                 static __rMASK_C32_128__: [::core::arch::x86_64::__m128i; 3 + 8] = unsafe {{::core::mem::transmute([
-                    reverse([ 0,  0,  0, 0i32]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,    0]),
-                    reverse([-1, -1,  0,    0]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                    reverse([-1, -1, -1,   -1]),
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd256.rmask.data\", \"\", true)})]
-                 static __rMASK_C32_256__: [::core::arch::x86_64::__m256i; 5 + 8] = unsafe {{::core::mem::transmute([
-                    reverse([ 0,  0,  0,  0,  0,  0,  0, 0i32]),
-                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
-                    reverse([ 0,  0,  0,  0,  0,  0,  0,    0]),
-                    reverse([-1, -1,  0,  0,  0,  0,  0,    0]),
-                    reverse([-1, -1, -1, -1,  0,  0,  0,    0]),
-                    reverse([-1, -1, -1, -1, -1, -1,  0,    0]),
-                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
-                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
-                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
-                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
-                    reverse([-1, -1, -1, -1, -1, -1, -1,   -1]),
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.simd512.rmask.data\", \"\", true)})]
-                 static __rMASK_C32_512__: [u16; 9 + 8] = [
-                    0b0000000000000000u16.reverse_bits(),
-                    0b0000000000000000u16.reverse_bits(),
-                    0b0000000000000000u16.reverse_bits(),
-                    0b0000000000000000u16.reverse_bits(),
-                    0b0000000000000000u16.reverse_bits(),
-                    0b0000000000000011u16.reverse_bits(),
-                    0b0000000000001111u16.reverse_bits(),
-                    0b0000000000111111u16.reverse_bits(),
-                    0b0000000011111111u16.reverse_bits(),
-                    0b0000001111111111u16.reverse_bits(),
-                    0b0000111111111111u16.reverse_bits(),
-                    0b0011111111111111u16.reverse_bits(),
-                    0b1111111111111111u16.reverse_bits(),
-                    0b1111111111111111u16.reverse_bits(),
-                    0b1111111111111111u16.reverse_bits(),
-                    0b1111111111111111u16.reverse_bits(),
-                    0b1111111111111111u16.reverse_bits(),
-                ];
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.flip.re.data\", \"\", true)})]
-                 static __FLIP_RE_C32__: ::core::arch::x86_64::__m512i = unsafe {{::core::mem::transmute([
-                    [i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0],
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.flip.re.data\", \"\", true)})]
-                 static __FLIP_RE_C64__: ::core::arch::x86_64::__m512i = unsafe {{::core::mem::transmute([
-                    [i64::MIN, 0, i64::MIN, 0, i64::MIN, 0, i64::MIN, 0],
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c32.flip.im.data\", \"\", true)})]
-                 static __FLIP_IM_C32__: ::core::arch::x86_64::__m512i = unsafe {{::core::mem::transmute([
-                    [0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN, 0, i32::MIN],
-                ])}};
-
-                #[unsafe(export_name = {func_name(\"gemm.microkernel.c64.flip.im.data\", \"\", true)})]
-                 static __FLIP_IM_C64__: ::core::arch::x86_64::__m512i = unsafe {{::core::mem::transmute([
-                    [0, i64::MIN, 0, i64::MIN, 0, i64::MIN, 0, i64::MIN],
-                ])}};
-            "
-        );
 
         fs::write(&dest_path, &code)?;
     }
