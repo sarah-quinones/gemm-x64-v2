@@ -1553,8 +1553,8 @@ pub unsafe fn gemm(
                     let (row_chunk, col_chunk, rowmajor) = if n_threads > 1 {
                         (
                             //
-                            [m, m, m, l3, mr],
-                            [n, n, n, l3, nr],
+                            [m, m, m, l3 / 16 * 16, mr],
+                            [n, n, n, l3 / 16 * 16, nr],
                             false,
                         )
                     } else if true {
@@ -1624,6 +1624,9 @@ pub unsafe fn gemm(
                     });
                     packed_lhs_rs[0] = 0;
                     packed_rhs_cs[0] = 0;
+
+                    assert!(lhs_size * size_of::<Page>() >= row_chunk[q - 2] * kc * sizeof);
+                    assert!(rhs_size * size_of::<Page>() >= col_chunk[q - 2] * kc * sizeof);
 
                     unsafe {
                         kernel(
