@@ -1631,6 +1631,7 @@ dependencies = [
  "rayon",
  "serde_json",
  "spindle",
+ "sysctl",
  "toml",
 ]
 
