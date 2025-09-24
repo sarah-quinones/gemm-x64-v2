@@ -3458,7 +3458,7 @@ fn main() -> Result {
 				code += &format!(
 					"
                 unsafe extern {QUOTE}C{QUOTE} {{
-                    #[link_name = {name}]
+                    #[link_name = ::core::concat!(\"\\x01\", {name})]
                     unsafe fn __decl_{ty}_simd{bits}_{i}__();
                 }}
                 "
