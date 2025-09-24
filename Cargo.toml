@@ -3,8 +3,8 @@ name = "private-gemm-x86"
 version = "0.1.16"
 edition = "2021"
 authors = ["sarah quiñones <sarah@veganb.tw>"]
-description = "x86 matmul impl"
-repository = "https://github.com/sarah-quinones/gemm-x86-v2"
+description = "x86-64 matmul impl"
+repository = "https://github.com/sarah-quinones/gemm-x64-v2/"
 license = "MIT"
 rust-version = "1.84.0"
 
