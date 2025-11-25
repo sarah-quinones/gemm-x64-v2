@@ -528,7 +528,7 @@ macro_rules! jmp {
     }};
     ($($label: tt)*) => {
         match format!($($label)*) {
-            label => asm!("jmp {label}"),
+            label => asm!("jmp [{label}@GOTPCREL + rip]"),
         }
     };
 }
@@ -536,7 +536,7 @@ macro_rules! jmp {
 macro_rules! call {
     ($($label: tt)*) => {
         match format!($($label)*) {
-            label => asm!("call {label}"),
+            label => asm!("call [{label}@GOTPCREL + rip]"),
         }
     };
 }
