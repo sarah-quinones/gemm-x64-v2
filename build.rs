@@ -61,6 +61,20 @@ macro_rules! func {
 	($name: tt) => {
 		let __name__ = &format!($name);
 
+		align!();
+		asm!("{__name__}:");
+		defer!(asm!("ret"));
+
+		macro_rules! name {
+			() => {
+				__name__
+			};
+		}
+	};
+
+	(pub $name: tt) => {
+		let __name__ = &format!($name);
+
 		asm!(".globl {__name__}");
 		align!();
 		asm!("{__name__}:");
@@ -528,7 +542,7 @@ macro_rules! jmp {
     }};
     ($($label: tt)*) => {
         match format!($($label)*) {
-            label => asm!("jmp [{label}@GOTPCREL + rip]"),
+            label => asm!("jmp {label}"),
         }
     };
 }
@@ -536,7 +550,7 @@ macro_rules! jmp {
 macro_rules! call {
     ($($label: tt)*) => {
         match format!($($label)*) {
-            label => asm!("call [{label}@GOTPCREL + rip]"),
+            label => asm!("call {label}"),
         }
     };
 }
@@ -1635,7 +1649,7 @@ impl Target {
 		let need_mask = simd.sizeof() >= 16;
 
 		let main = {
-			func!("{func_name(prefix, &suffix, false)}");
+			func!(pub "{func_name(prefix, &suffix, false)}");
 			{
 				label!({
 					let good;
@@ -1986,7 +2000,7 @@ impl Target {
 					let prologue;
 				});
 
-				func!("{func_name(prefix, suffix, false)}");
+				func!(pub "{func_name(prefix, suffix, false)}");
 				label!(row_check = _);
 				if m > 1 {
 					cmp!(nrows, (m - 1) * self.len() + 1);
