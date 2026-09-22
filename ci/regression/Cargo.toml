@@ -1,0 +1,14 @@
+[package]
+name = "gemm-regression-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Run the integration test without the root package's benchmark-only dependencies
+# (including its sibling ../gemm/gemm checkout and system BLAS libraries).
+[dependencies]
+private-gemm-x86 = { path = "../.." }
+
+[[test]]
+name = "gemm_bug"
+path = "../../tests/gemm_bug.rs"

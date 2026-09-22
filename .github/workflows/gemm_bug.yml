@@ -1,0 +1,30 @@
+name: GEMM regression
+
+on:
+  push:
+    branches: ["codex/triangular-tile-regression"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fixed source - both pass
+        # --test-threads=1 to run tests sequentially and avoid simultaneous large matrix allocations.
+        # The parallel GEMM invocation still uses four threads internally.
+        run: cargo +stable test --locked --release --manifest-path ci/regression/Cargo.toml --test gemm_bug -- --test-threads=1
+      - name: Original source - sequential passes, parallel fails
+        run: |
+          git show b161af1e7751a9b7978414d2419438b13c58a97b:src/lib.rs > src/lib.rs
+          cargo +stable test --locked --release --manifest-path ci/regression/Cargo.toml --test gemm_bug sequential_gemm_lower_ones
+          cargo +stable test --locked --release --manifest-path ci/regression/Cargo.toml --test gemm_bug parallel_gemm_lower_ones

@@ -533,7 +533,11 @@ pub unsafe fn millikernel_par(
 					pack_rhs_job[j].store(2, Ordering::Release);
 				}
 
-				if rectangular || (tril && pos.row + mr > pos.col) || (triu && pos.col + col_chunk > pos.row) {
+				// Test the current microtile's absolute bounds, not the enclosing block's origin.
+				if rectangular
+					|| (tril && pos.row + row + row_chunk > pos.col + col)
+					|| (triu && pos.col + col + col_chunk > pos.row + row)
+				{
 					call_microkernel(
 						microkernel,
 						lhs,
