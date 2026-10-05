@@ -231,7 +231,7 @@ pub unsafe fn millikernel_rowmajor(
                         }
 
 
-                        if rectangular || (tril && pos.row + mr > pos.col) || (triu && pos.col + col_chunk > pos.row) {
+                        if rectangular || (tril && pos.row + row_chunk > pos.col) || (triu && pos.col + col_chunk > pos.row) {
                             call_microkernel(
                                 microkernel,
                                 lhs,
@@ -356,7 +356,7 @@ pub unsafe fn millikernel_colmajor(
                                 rhs = null();
                             }
                         })*
-                        if rectangular || (tril && pos.row + mr > pos.col) || (triu && pos.col + col_chunk > pos.row) {
+                        if rectangular || (tril && pos.row + row_chunk > pos.col) || (triu && pos.col + col_chunk > pos.row) {
                             call_microkernel(
                                 microkernel,
                                 lhs,
@@ -533,7 +533,7 @@ pub unsafe fn millikernel_par(
 					pack_rhs_job[j].store(2, Ordering::Release);
 				}
 
-				if rectangular || (tril && pos.row + mr > pos.col) || (triu && pos.col + col_chunk > pos.row) {
+				if rectangular || (tril && row + pos.row + row_chunk > col + pos.col) || (triu && col + pos.col + col_chunk > row + pos.row) {
 					call_microkernel(
 						microkernel,
 						lhs,
@@ -1438,22 +1438,24 @@ pub unsafe fn gemm(
 					let q = row_chunk.len();
 					{
 						for i in (1..q - 1).rev() {
-							row_chunk[i - 1] = Ord::max(row_chunk[i - 1].next_multiple_of(row_chunk[i]), row_chunk[i]);
 							if row_chunk[i - 1] > l3 / 2 && row_chunk[i - 1] < l3 {
 								row_chunk[i - 1] = l3 / 2;
 							}
 							if row_chunk[i - 1] >= l3 {
 								row_chunk[i - 1] = Ord::min(row_chunk[i - 1], 2 * row_chunk[i]);
 							}
+							// this step is the last one because we want to enforce that the chunk size is at least
+							// as large as the ones that are nested within it
+							row_chunk[i - 1] = Ord::max(row_chunk[i - 1].next_multiple_of(row_chunk[i]), row_chunk[i]);
 						}
 						for i in (1..q - 1).rev() {
-							col_chunk[i - 1] = Ord::max(col_chunk[i - 1].next_multiple_of(col_chunk[i]), col_chunk[i]);
 							if col_chunk[i - 1] > l3 / 2 && col_chunk[i - 1] < l3 {
 								col_chunk[i - 1] = l3 / 2;
 							}
 							if col_chunk[i - 1] >= l3 {
 								col_chunk[i - 1] = Ord::min(col_chunk[i - 1], 2 * col_chunk[i]);
 							}
+							col_chunk[i - 1] = Ord::max(col_chunk[i - 1].next_multiple_of(col_chunk[i]), col_chunk[i]);
 						}
 					}
 
